@@ -62,6 +62,25 @@ that skipped them is not a green run.
 - **Don't overstate in docs or comments.** A comment describing a property the
   code lacks is worse than none: it stops the next reader checking.
 
+## Finding work
+
+The [issue tracker](https://github.com/swiftugandan/stepd/issues) is the live
+list; `gap`-labelled issues carry the register's severities. `README.md`'s "Next
+steps" and `docs/GAPS.md` are snapshots taken when someone last edited them, so
+read the tracker too and trust it where they disagree.
+
+```bash
+gh issue list --state open
+gh run list --limit 5 --json databaseId,status,conclusion,displayTitle
+gh run view <id> --json jobs -q '.jobs[] | "\(.conclusion)\t\(.name)"'
+gh run view <id> --log-failed
+```
+
+CI runs on every push to `main`, so start there: a red lane means a claim the
+README cites as evidence is not currently being produced, which outranks new
+work. Check whether an issue already exists for a failure before filing one, and
+say which issue a change closes.
+
 ## Where to read
 
 | | |
@@ -72,6 +91,3 @@ that skipped them is not a green run.
 | [`docs/adr/`](docs/adr/) | ADRs; the silent-corruption ones are eager occurrence claiming, the durable run inbox and pooler-safe locking |
 | [`docs/runbooks/restore-hazard.md`](docs/runbooks/restore-hazard.md) | Read before you need it: PITR re-executes side effects |
 | [`docs/GAPS.md`](docs/GAPS.md) | Gap register — note it records spec resolutions, not always code |
-
-Open gaps are tracked as [issues](https://github.com/swiftugandan/stepd/issues),
-labelled `gap` with the register's severities.
