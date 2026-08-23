@@ -45,9 +45,8 @@ process has no engine in it.
 | `stepd-conformance` | 3,084 | 12 | The protocol §12 battery, and the reference app it drives. |
 
 **291 tests, whole workspace green** — verified against PostgreSQL 16.14 on
-2026-08-23, with the `--test-threads=1` caveat below. Of those, 39 need a live
-database and 17 are the end-to-end lane that drives a real SDK app over a real
-socket.
+2026-08-23. Of those, 39 need a live database and 17 are the end-to-end lane
+that drives a real SDK app over a real socket.
 
 Requires Rust **1.85** — `Waker::noop`, which is what lets a workflow test run
 with no async runtime at all.
@@ -116,11 +115,11 @@ the first failure.
 
 ```bash
 export STEPD_TEST_DATABASE_URL="postgres://postgres@127.0.0.1:5433/stepd_rust"
-cargo test --workspace -- --test-threads=1     # see the caveat below
+cargo test --workspace
 ```
 
-Serially that is **291 passed, 0 failed**, in about four minutes — most of it
-the conformance battery and the simulation harness.
+**291 passed, 0 failed**, in about four minutes — most of it the conformance
+battery and the simulation harness.
 
 **Without `STEPD_TEST_DATABASE_URL` the database-backed tests skip loudly.**
 That is deliberate: a database test that silently passes when it did not run is
@@ -132,29 +131,28 @@ parameter rather than a rewrite:
 
 ```bash
 STEPD_SIM_SEEDS=250 cargo test --release -p stepd-store-postgres --test simulation
-cargo test -p stepd-conformance --test battery -- --test-threads=1 --nocapture
+cargo test -p stepd-conformance --test battery -- --nocapture
 ```
 
-### Known: the conformance battery needs `--test-threads=1`
+### What the battery isolates, and why
 
-Run it without that flag on a multi-core machine and the two `blobs` cases fail
-with `no_such_run`, reporting **level 1** instead of level 2.
+Each battery gets its own database, namespace, port and app instance. That is
+not tidiness. Blob collection is server-wide by design — an unreferenced blob is
+unreferenced whatever namespace it is in — so two batteries sharing a database
+have one deleting the other's in-flight reservations.
 
-It is not an engine defect and not database interference — it reproduces on a
-fresh database and disappears entirely when the tests run serially. The cause is
-in the reference app: the blob client is a process global, because the handler
-is a plain `async fn` with no place to carry one. The comment above it explains
-that it was made *replaceable* rather than a bare `OnceLock` so that several
-batteries in one process would not leave later ones pointing at a closed socket
-— which handles them running one after another, and not them running at the same
-time. Four concurrent batteries overwrite each other's client, and a handler
-then reserves a blob against a namespace its token does not cover.
+The reference app's own state is isolated on the same principle: its blob client
+and effect log live in an `AppState` owned by the instance, cloned into each step
+closure, rather than in a `static`. They were `static` until 2026-08-23, and the
+four concurrent batteries shared them — a blob client configured by whichever
+battery started last, and an effect log any battery's `reset` wiped for all of
+them. The `blobs` suite failed with `no_such_run` and the runner reported level 1
+instead of level 2, on a multi-core machine only.
 
-The project's own finding 13 is that the same defect arrives twice by the same
-route, and this is a third arrival: two tests interfering through shared mutable
-state, caught by neither of the two structural invariants that exist because of
-the first two. Fixing it properly means giving the reference app a per-battery
-client rather than a global one.
+That was the project's finding 13 arriving a third time: two tests interfering
+through shared mutable state. Nothing generalised the lesson after the first two,
+so the reference app made the same choice from scratch. If you add state to that
+app, put it in `AppState` — an instance owns it, the process does not.
 
 ## Running the server
 

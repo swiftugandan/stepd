@@ -40,6 +40,41 @@ pub struct Options {
     pub case_timeout: Duration,
     /// Run only these suites, if non-empty.
     pub only: Vec<String>,
+    /// Called once the runner's server is serving, with its API base URL and an
+    /// operator token for this run's namespace.
+    ///
+    /// Whoever started the app under test finishes configuring it here. The
+    /// bundled reference app needs it to point its blob client at the server,
+    /// and cannot be told sooner: the app has to be serving before this runner
+    /// will read its manifest, and the API it must call does not exist until
+    /// after that. A third-party app is configured by whoever launched it and
+    /// leaves this `None`.
+    pub on_ready: Option<OnReady>,
+}
+
+/// What a readiness callback is handed: the API base URL, and an operator token.
+type ReadyFn = dyn Fn(&str, &str) + Send + Sync;
+
+/// A callback invoked with `(api_base, operator_token)` once the runner is up.
+#[derive(Clone)]
+pub struct OnReady(Arc<ReadyFn>);
+
+impl OnReady {
+    /// Wrap a callback.
+    pub fn new(f: impl Fn(&str, &str) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    /// Invoke it.
+    pub fn call(&self, api_base: &str, token: &str) {
+        (self.0)(api_base, token)
+    }
+}
+
+impl std::fmt::Debug for OnReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OnReady(..)")
+    }
 }
 
 impl Default for Options {
@@ -53,6 +88,7 @@ impl Default for Options {
             // reports a defect that is not there.
             case_timeout: Duration::from_secs(90),
             only: Vec::new(),
+            on_ready: None,
         }
     }
 }

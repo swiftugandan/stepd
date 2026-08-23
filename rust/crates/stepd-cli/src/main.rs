@@ -191,6 +191,9 @@ async fn main() -> Result<()> {
                 signing_key: key.into_bytes(),
                 case_timeout: std::time::Duration::from_secs(case_timeout),
                 only: suites,
+                // The app under test is somebody else's process, configured by
+                // whoever started it.
+                on_ready: None,
             })
             .await?;
 

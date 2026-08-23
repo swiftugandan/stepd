@@ -16,16 +16,19 @@
 
 use stepd_conformance::{reference, Options, Report};
 
-async fn serve_reference() -> Option<(String, tokio::task::JoinHandle<()>)> {
+async fn serve_reference() -> Option<(String, reference::State, tokio::task::JoinHandle<()>)> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
     let addr = listener.local_addr().ok()?;
     let url = format!("http://{addr}");
     let app = reference::app(&url, b"stepd-conformance".to_vec());
+    // This instance's state, kept so the battery can finish configuring it once
+    // the runner's API exists. Every concurrent battery holds its own.
+    let state = app.state.clone();
     let router = reference::router(app);
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
-    Some((url, handle))
+    Some((url, state, handle))
 }
 
 /// A fresh database for one battery run.
@@ -52,11 +55,14 @@ async fn fresh_database() -> Option<String> {
 
 async fn run_battery(only: &[&str]) -> Option<Report> {
     let database_url = fresh_database().await?;
-    let (app_url, _app) = serve_reference().await?;
+    let (app_url, state, _app) = serve_reference().await?;
     let report = stepd_conformance::run(Options {
         app_url,
         database_url,
         only: only.iter().map(|s| s.to_string()).collect(),
+        on_ready: Some(stepd_conformance::OnReady::new(move |api_base, token| {
+            state.configure_blobs(api_base, token)
+        })),
         ..Default::default()
     })
     .await

@@ -33,17 +33,20 @@ pub mod reference;
 pub mod report;
 pub mod suites;
 
-pub use harness::{ConformanceManifest, Harness, Options};
+pub use harness::{ConformanceManifest, Harness, OnReady, Options};
 pub use report::{CaseResult, Report, Status, ALL_SUITES, LEVEL_1};
 
 /// Run the battery and return what it concluded.
 pub async fn run(options: Options) -> anyhow::Result<Report> {
     let harness = Harness::start(options).await?;
     // The `blobs` suite needs the app to be able to call back, which needs an
-    // address and a token that do not exist until the harness is up. An app in
-    // another language is configured by whoever starts it; the bundled reference
-    // app is started by the test, so the runner tells it here.
-    reference::configure_blobs(&harness.api_base(), &harness.mint("operator").await?);
+    // address and a token that do not exist until the harness is up. Every app
+    // is configured by whoever started it — including the bundled reference one,
+    // which the test starts. The runner signals readiness and holds no opinion
+    // about which app is listening.
+    if let Some(on_ready) = harness.options.on_ready.clone() {
+        on_ready.call(&harness.api_base(), &harness.mint("operator").await?);
+    }
     let mut report = Report {
         declared: harness.manifest.suites.clone(),
         sdk: harness.manifest.sdk.clone(),

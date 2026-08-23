@@ -89,7 +89,9 @@ async fn order_fulfilment(ctx: &Ctx) -> StepResult<Receipt> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
-    let base = args.next().unwrap_or_else(|| "http://127.0.0.1:8080".into());
+    let base = args
+        .next()
+        .unwrap_or_else(|| "http://127.0.0.1:8080".into());
     let token = args.next().expect("usage: order_demo <base-url> <token>");
     // `stepd dev` signs with this unless STEPD_SIGNING_KEY overrides it.
     let signing_key = std::env::var("STEPD_SIGNING_KEY")
