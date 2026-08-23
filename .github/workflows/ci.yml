@@ -179,12 +179,25 @@ jobs:
           DB_HOST: postgres
           DB_USER: postgres
           DB_PASSWORD: stepd
-          DB_NAME: stepd
+          # A wildcard `[databases]` entry, not a single name. The conformance
+          # battery gives each run its own database (battery.rs `fresh_database`,
+          # because blob collection is server-wide), creates it through this
+          # pooler and then connects to it by name. A pooler only routes
+          # databases it has an entry for, so a literal `stepd` here fails that
+          # second connection with "no such database" even though the CREATE
+          # succeeded on the server behind it.
+          DB_NAME: "*"
           # Transaction mode is the point. Session-scoped state — an advisory
           # lock, a SET, a prepared statement — silently stops working here,
           # which is exactly the failure this lane exists to catch.
           POOL_MODE: transaction
           AUTH_TYPE: scram-sha-256
+          # edoburu/pgbouncer defaults to listen_port 5432. Without this the
+          # published 6432 has nothing behind it, the client reads EOF instead
+          # of an auth request, and all 17 end-to-end tests fail at
+          # Server::build before the engine is ever reached — which is how this
+          # lane ran from its first execution until it was set.
+          LISTEN_PORT: 6432
         ports: ["6432:6432"]
     env:
       STEPD_TEST_DATABASE_URL: postgres://postgres:stepd@localhost:6432/stepd
