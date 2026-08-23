@@ -1,0 +1,58 @@
+# Dependency policy for `cargo deny check`.
+#
+# The licence list exists because §3 positions this project against Inngest's
+# SSPL and Restate's BSL. A project that makes that argument should know what
+# it is redistributing, and CI should fail when the answer changes.
+#
+# The list is deliberately minimal: it names only licences some dependency
+# actually requires today, not every licence that would be acceptable. A new
+# dependency under anything else fails this lane and gets a decision rather
+# than silent admission. That is the point — a permissive-enough catch-all
+# would let a copyleft transitive dependency in without anyone noticing.
+
+[licenses]
+# Every entry below is load-bearing. Where a crate offers a choice
+# (`Unlicense OR MIT`), the allowed side is what we take, so the alternative
+# is absent from this list on purpose.
+allow = [
+    "Apache-2.0",         # the workspace's own licence, and most of the tree
+    "MIT",                # the other half of the usual Rust dual licence
+    "ISC",                # rustls-webpki, untrusted; also half of ring
+    "BSD-3-Clause",       # subtle; also half of matchit
+    "Zlib",               # foldhash
+    "Unicode-3.0",        # the icu/zerovec family, and half of unicode-ident
+    "CDLA-Permissive-2.0" # webpki-roots (the Mozilla root store data)
+]
+
+# Two crates are licensed under a conjunction rather than a choice, so both
+# halves of each must be allowed above; neither is optional:
+#   ring          Apache-2.0 AND ISC
+#   matchit       MIT AND BSD-3-Clause
+#   unicode-ident (MIT OR Apache-2.0) AND Unicode-3.0
+#
+# LGPL-2.1-or-later is reachable in the tree only as one arm of r-efi's
+# `MIT OR Apache-2.0 OR LGPL-2.1-or-later`. Leaving it out of `allow` is what
+# makes that a real choice rather than an accident.
+
+[advisories]
+# Defaults: fail on any RUSTSEC advisory affecting the tree. No ignores — an
+# ignore here is a decision that belongs in a commit message, not a config
+# file that outlives the reason for it.
+
+[bans]
+# Duplicate versions are noisy in a workspace this size and are not currently
+# a correctness concern, so they warn rather than fail.
+multiple-versions = "warn"
+wildcards = "deny"
+# `stepd-core` dev-depends on itself by path to turn on its own `testing`
+# feature for its tests, which is a wildcard by cargo-deny's reckoning. Path
+# dependencies are workspace-internal and carry no supply-chain question, so
+# they are exempt; a wildcard on anything from a registry still fails.
+allow-wildcard-paths = true
+
+[sources]
+# Everything comes from crates.io. A git or alternate-registry dependency is
+# a supply-chain change that should be argued for, not merged quietly.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
