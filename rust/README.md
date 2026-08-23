@@ -1,6 +1,6 @@
 # stepd — the Rust implementation
 
-Ten crates, thirteen migrations and four SQL suites. The root
+The crates, the migrations and the SQL suites. The root
 [`README.md`](../README.md) says what the project is and where it is honest
 about not being finished; this file is for working inside `rust/`.
 
@@ -31,22 +31,22 @@ crates are interchangeable implementations of `core`'s traits; the SDK branch
 reaches `proto` without going through `core` at all, because a workflow author's
 process has no engine in it.
 
-| Crate | Lines | Tests | What it owns |
-|---|--:|--:|---|
-| `stepd-proto` | 1,370 | 36 | The wire contract. **This is the crate a third party implements against** — no I/O, no runtime, so it can be read as a specification. |
-| `stepd-core` | 3,887 | 65 | The engine, generic over storage and transport traits. In-memory fakes for every interface, so the logic is testable without a database. |
-| `stepd-store-postgres` | 1,760 | 39 | The Postgres store, plus the simulation harness. Pooler-safe: row-level locking only, never session-scoped advisory locks. |
-| `stepd-expr-cel` | 1,056 | 16 | A deliberately partial CEL subset, explicit about what it refuses rather than silently accepting. |
-| `stepd-transport-http` | 531 | 10 | Signed HTTP push, and the egress policy that stops an app-supplied URL reaching cloud metadata. |
-| `stepd-sdk-core` | 2,529 | 32 | The replay machinery. No async, which is what makes the dangerous logic exhaustively testable without scheduling noise. |
-| `stepd-sdk` | 2,298 | 29 | What a workflow author touches: `Function`, `Ctx`, the axum adapter, and the in-process test harness. |
-| `stepd-server` | 3,153 | 45 | Ingest, management and read API, the operations console, dispatch and convergence loops. |
-| `stepd-cli` | 908 | 4 | `serve` · `migrate` · `doctor` · `dev` · `token` · `namespace` · `run` · `limits` · `conformance` |
-| `stepd-conformance` | 3,084 | 12 | The protocol §12 battery, and the reference app it drives. |
+| Crate | What it owns |
+|---|---|
+| `stepd-proto` | The wire contract. **This is the crate a third party implements against** — no I/O, no runtime, so it can be read as a specification. |
+| `stepd-core` | The engine, generic over storage and transport traits. In-memory fakes for every interface, so the logic is testable without a database. |
+| `stepd-store-postgres` | The Postgres store, plus the simulation harness. Pooler-safe: row-level locking only, never session-scoped advisory locks. |
+| `stepd-expr-cel` | A deliberately partial CEL subset, explicit about what it refuses rather than silently accepting. |
+| `stepd-transport-http` | Signed HTTP push, and the egress policy that stops an app-supplied URL reaching cloud metadata. |
+| `stepd-sdk-core` | The replay machinery. No async, which is what makes the dangerous logic exhaustively testable without scheduling noise. |
+| `stepd-sdk` | What a workflow author touches: `Function`, `Ctx`, the axum adapter, and the in-process test harness. |
+| `stepd-server` | Ingest, management and read API, the operations console, dispatch and convergence loops. |
+| `stepd-cli` | `serve` · `migrate` · `doctor` · `dev` · `token` · `namespace` · `run` · `limits` · `conformance` |
+| `stepd-conformance` | The protocol §12 battery, and the reference app it drives. |
 
-**291 tests, whole workspace green** — verified against PostgreSQL 16.14 on
-2026-08-23. Of those, 39 need a live database and 17 are the end-to-end lane
-that drives a real SDK app over a real socket.
+Every crate carries unit tests against in-memory fakes. On top of those sit the
+lanes that need a live database: the store's own tests, the simulation harness,
+and the end-to-end lane that drives a real SDK app over a real socket.
 
 Requires Rust **1.85** — `Waker::noop`, which is what lets a workflow test run
 with no async runtime at all.
@@ -54,15 +54,17 @@ with no async runtime at all.
 ## Layout
 
 ```
-crates/            the ten crates above
-migrations/        0001..0013, applied by `stepd migrate` or by psql — not both
-tests/sql/         four suites that run against a hand-migrated database
+crates/            the crates above
+migrations/        applied by `stepd migrate` or by psql — never both
+tests/sql/         suites that run against a hand-migrated database
 ```
 
 The migrations carry the engine itself, not just the schema: the commit path
 lives in SQL functions, and `tests/sql/test_invariants.sql` fails the build if
-a serialization point moves. That file is a countermeasure with a history —
-see finding 2 in the root README for what it once failed to point at.
+a serialization point moves. That file is a countermeasure with a
+history: it once asserted properties of the SQL while the Rust store had grown
+its own reimplementation of the commit that called none of it, so the tests
+guarded a correctness centre that was not the one running.
 
 ## Building
 
@@ -77,7 +79,7 @@ longer than it looks like it needs to be.
 
 **The Rust tests and the SQL suites need different databases.** `psql -f
 migrations/*.sql` and `stepd migrate` keep separate ideas of what has been
-applied; run both against one database and sqlx starts from migration 1 against
+applied; run both against one database and sqlx starts from the first migration against
 objects that already exist. `migrate` detects this and says so rather than
 failing obscurely, but two databases is the clean answer.
 
@@ -101,15 +103,14 @@ psql "$SQLDB" -v ON_ERROR_STOP=1 -q \
   -f tests/sql/test_cron.sql -f tests/sql/test_invariants.sql
 ```
 
-| Suite | Assertions |
-|---|--:|
-| `test_engine.sql` | 25 |
-| `test_engine_ops.sql` | 94 |
-| `test_cron.sql` | 47 |
-| `test_invariants.sql` | 27 structural |
+| Suite | What it asserts |
+|---|---|
+| `test_engine.sql` | Core engine behaviour: claiming, commit, memoisation |
+| `test_engine_ops.sql` | Every op — invoke, cascade, continue, limits, protocol errors |
+| `test_cron.sql` | Schedule planning, catch-up, misfire, singleton, fairness |
+| `test_invariants.sql` | **Structural**: fails the build if a serialization point moves |
 
-166 behavioural and 27 structural. They print `PASS` per assertion and stop on
-the first failure.
+They print `PASS` per assertion and stop on the first failure.
 
 ### The Rust tests — migrated by sqlx
 
@@ -118,7 +119,7 @@ export STEPD_TEST_DATABASE_URL="postgres://postgres@127.0.0.1:5433/stepd_rust"
 cargo test --workspace
 ```
 
-**291 passed, 0 failed**, in about four minutes — most of it the conformance
+Expect it to take a few minutes; most of the wall-clock is the conformance
 battery and the simulation harness.
 
 **Without `STEPD_TEST_DATABASE_URL` the database-backed tests skip loudly.**
@@ -143,16 +144,17 @@ have one deleting the other's in-flight reservations.
 
 The reference app's own state is isolated on the same principle: its blob client
 and effect log live in an `AppState` owned by the instance, cloned into each step
-closure, rather than in a `static`. They were `static` until 2026-08-23, and the
-four concurrent batteries shared them — a blob client configured by whichever
-battery started last, and an effect log any battery's `reset` wiped for all of
-them. The `blobs` suite failed with `no_such_run` and the runner reported level 1
-instead of level 2, on a multi-core machine only.
+closure, rather than in a `static`. They were `static` until recently, and the
+concurrent batteries shared them — a blob client configured by whichever battery
+started last, and an effect log any battery's `reset` wiped for all of them. The
+`blobs` suite failed with `no_such_run` and the runner reported level 1 instead
+of level 2, on a multi-core machine only.
 
-That was the project's finding 13 arriving a third time: two tests interfering
-through shared mutable state. Nothing generalised the lesson after the first two,
-so the reference app made the same choice from scratch. If you add state to that
-app, put it in `AppState` — an instance owns it, the process does not.
+That was two tests interfering through shared mutable state, which the root
+README's findings record happening twice before — in the dispatcher, then in the
+cron sweep. Nothing generalised the lesson after those, so the reference app made
+the same choice from scratch. If you add state to that app, put it in `AppState`
+— an instance owns it, the process does not.
 
 ## Running the server
 
@@ -204,12 +206,16 @@ code against the design is what found the defect in them:
 
 * **Eager occurrence claiming.** `ctx.step()` claims when *called*, not when its
   future is *polled*. Claiming at poll time ties the hash to scheduler order, so
-  `join!` silently re-executes completed work. `docs/SDK-DESIGN-rust.md` and
-  ADR-012.
+  `join!` silently re-executes completed work. See
+  [`docs/SDK-DESIGN-rust.md`](../docs/SDK-DESIGN-rust.md) and the
+  [eager occurrence claiming](../docs/adr/012-eager-occurrence-claiming.md) ADR.
 * **The commit path.** It lives in SQL, and the Rust store once grew four hundred
   lines that reimplemented it and called none of it — two correctness centres,
-  with the tests guarding the one that did not run. ADR-011 and ADR-019.
+  with the tests guarding the one that did not run. See the
+  [durable run inbox](../docs/adr/011-durable-run-inbox.md) and
+  [pooler-safe locking](../docs/adr/019-pooler-safe-locking.md) ADRs.
 
-`docs/adr/` has twenty-two ADRs; 011, 012 and 019 are the silent-corruption
-ones. `docs/runbooks/restore-hazard.md` is the one to read before it is needed:
+[`docs/adr/`](../docs/adr/) holds the decision records; the silent-corruption
+ones are eager occurrence claiming, the durable run inbox and pooler-safe
+locking. `docs/runbooks/restore-hazard.md` is the one to read before it is needed:
 a point-in-time restore re-executes side effects and re-fires cron occurrences.
