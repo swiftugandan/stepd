@@ -1,0 +1,269 @@
+# stepd CI — tiered by feedback latency (PRD §10.2).
+#
+# The tiers are not cosmetic. A suite that outgrows its budget gets bypassed,
+# and a bypassed suite is worse than a smaller one: it costs the same to
+# maintain and catches nothing. So each lane has a stated budget, and a lane
+# that outgrows it is refactored rather than tolerated.
+#
+#   tier 1  ≤ 10 s    unit tests, no I/O            every push
+#   tier 2  ≤ 5 min   integration against Postgres  every push
+#   tier 3  ≤ 30 min  simulation, pooler lane       every push to main, nightly
+#   tier 4  hours     soak                          nightly
+#
+# The pgbouncer lane exists because F-DL-1 is a claim about a configuration this
+# project does not otherwise run in. "We only use row-level locks" is an
+# assertion; running the whole suite through a transaction-mode pooler is
+# evidence.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 3 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # ---------------------------------------------------------------- tier 1
+  unit:
+    name: "tier 1 · unit (≤10s)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: format
+        run: cargo fmt --all --check
+        working-directory: rust
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        working-directory: rust
+      - name: unit tests
+        # No STEPD_TEST_DATABASE_URL: the database-backed tests skip loudly, and
+        # this lane is about the logic that needs nothing running.
+        run: cargo test --workspace --lib
+        working-directory: rust
+
+  # ---------------------------------------------------------------- boundaries
+  boundaries:
+    name: "tier 1 · crate boundaries"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: stepd-proto has no runtime, no I/O, no database
+        # The load-bearing constraint: it is what lets a third party build an
+        # alternative server or SDK against the published spec without
+        # inheriting our engine. A dependency added by accident would not
+        # break any test, so it needs its own assertion.
+        run: |
+          cargo tree -p stepd-proto --edges normal --prefix none \
+            | grep -Ei '^(tokio|sqlx|axum|reqwest|hyper) ' \
+            && { echo "stepd-proto gained a runtime or I/O dependency"; exit 1; } || true
+        working-directory: rust
+      - name: stepd-core names no concrete backend
+        # The moment the engine reaches for sqlx directly, swapping a backing
+        # service stops being a new crate and becomes a rewrite.
+        run: |
+          cargo tree -p stepd-core --edges normal --prefix none \
+            | grep -Ei '^(sqlx|reqwest|axum) ' \
+            && { echo "stepd-core gained a backend dependency"; exit 1; } || true
+        working-directory: rust
+      - name: install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: licences and advisories
+        run: cargo deny check
+        working-directory: rust
+
+  # ---------------------------------------------------------------- tier 2
+  integration:
+    name: "tier 2 · integration (≤5min)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: stepd
+          POSTGRES_DB: stepd
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      STEPD_TEST_DATABASE_URL: postgres://postgres:stepd@localhost:5432/stepd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: protocol schemas
+        run: |
+          pip install jsonschema referencing
+          python3 validate.py
+        working-directory: spec
+
+      - name: SQL behaviour and structural invariants
+        # The structural invariants are the countermeasure to this project's own
+        # finding that correctness can rest on an undocumented accident. They
+        # fail the build if a serialization lock is removed or moved.
+        #
+        # A SEPARATE database from the Rust tests. Applying the files by hand
+        # here and letting sqlx migrate there keeps two independent records of
+        # what has been applied; sharing one database means whichever runs second
+        # starts from migration 1 against objects that already exist.
+        run: |
+          psql "$STEPD_TEST_DATABASE_URL" -c 'CREATE DATABASE stepd_sql'
+          SQLDB="${STEPD_TEST_DATABASE_URL%/*}/stepd_sql"
+          for f in rust/migrations/*.sql; do
+            psql "$SQLDB" -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+          psql "$SQLDB" -v ON_ERROR_STOP=1 -q \
+            -f rust/tests/sql/test_engine.sql \
+            -f rust/tests/sql/test_engine_ops.sql \
+            -f rust/tests/sql/test_cron.sql \
+            -f rust/tests/sql/test_invariants.sql
+
+      - name: live-database and end-to-end tests
+        run: cargo test --workspace
+        working-directory: rust
+
+      - name: conformance battery against the reference app
+        # PRD T2 requires this lane. It is separate from `cargo test --workspace`
+        # above (which already runs it) so that a conformance failure is
+        # attributable at a glance: this is the step that says whether the SDK
+        # still matches the published protocol, and it is the one an external
+        # implementer will point at.
+        #
+        # The report names what it did NOT check. A suite this runner has not
+        # implemented exits non-zero rather than certifying around itself, and the
+        # test asserts there are none left — so a suite added to the protocol
+        # fails this lane until somebody writes it.
+        run: cargo test -p stepd-conformance --test battery -- --nocapture
+        working-directory: rust
+
+  # ---------------------------------------------------------------- tier 3
+  pooler:
+    name: "tier 3 · through pgbouncer (F-DL-1)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: stepd
+          POSTGRES_DB: stepd
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+      pgbouncer:
+        image: edoburu/pgbouncer:latest
+        env:
+          DB_HOST: postgres
+          DB_USER: postgres
+          DB_PASSWORD: stepd
+          DB_NAME: stepd
+          # Transaction mode is the point. Session-scoped state — an advisory
+          # lock, a SET, a prepared statement — silently stops working here,
+          # which is exactly the failure this lane exists to catch.
+          POOL_MODE: transaction
+          AUTH_TYPE: scram-sha-256
+        ports: ["6432:6432"]
+    env:
+      STEPD_TEST_DATABASE_URL: postgres://postgres:stepd@localhost:6432/stepd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: run the suite through the pooler
+        # The engine's own migrate step runs through the pooler too. DDL through
+        # a transaction-mode pooler is the part most likely to be surprising, so
+        # it is worth exercising rather than routing around.
+        run: cd rust && cargo test --workspace
+
+  # ---------------------------------------------------------------- tier 3
+  simulation:
+    name: "tier 3 · simulation (≤30min)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: stepd
+          POSTGRES_DB: stepd
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      STEPD_TEST_DATABASE_URL: postgres://postgres:stepd@localhost:5432/stepd
+      STEPD_SIM_SEEDS: "300"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Rust simulation against the real engine
+        run: cargo test --release -p stepd-store-postgres --test simulation
+        working-directory: rust
+      - name: Python simulation against the model
+        # Both are kept. The model finds design gaps — it found A8 on its first
+        # run — and the Rust harness finds implementation gaps. Neither
+        # subsumes the other.
+        run: |
+          python3 simulation.py 2000
+          python3 coverage_check.py 400
+        working-directory: reference
+
+  # ---------------------------------------------------------------- tier 4
+  soak:
+    name: "tier 4 · soak (nightly)"
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: stepd
+          POSTGRES_DB: stepd
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      STEPD_TEST_DATABASE_URL: postgres://postgres:stepd@localhost:5432/stepd
+      STEPD_SIM_SEEDS: "20000"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo test --release -p stepd-store-postgres --test simulation
+        working-directory: rust
+      - name: report seeds per finding
+        # Tracked as an efficiency metric (PRD §10.5): a seed budget that grows
+        # without finding anything is a budget to spend somewhere else.
+        run: echo "seeds=$STEPD_SIM_SEEDS findings=0" >> "$GITHUB_STEP_SUMMARY"

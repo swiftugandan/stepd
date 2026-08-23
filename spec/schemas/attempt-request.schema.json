@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stepd.dev/schemas/v1/attempt-request.schema.json",
+  "title": "stepd AttemptRequest (server to app)",
+  "type": "object",
+  "required": [
+    "protocol",
+    "attempt",
+    "fence",
+    "run",
+    "steps"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "protocol": {
+      "const": "1"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "fence": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "deadline": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "run": {
+      "type": "object",
+      "required": [
+        "id",
+        "function_id",
+        "namespace",
+        "started_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "common.schema.json#/$defs/uuidv7"
+        },
+        "function_id": {
+          "$ref": "common.schema.json#/$defs/identifier"
+        },
+        "function_version": {
+          "type": "string"
+        },
+        "namespace": {
+          "$ref": "common.schema.json#/$defs/identifier"
+        },
+        "key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 512
+        },
+        "started_at": {
+          "$ref": "common.schema.json#/$defs/timestamp"
+        },
+        "input": {
+          "$ref": "common.schema.json#/$defs/payload"
+        },
+        "cancelling": {
+          "type": "boolean",
+          "default": false
+        },
+        "parent": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "run_id"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "run_id": {
+              "$ref": "common.schema.json#/$defs/uuidv7"
+            },
+            "step_hash": {
+              "$ref": "common.schema.json#/$defs/stepHash"
+            },
+            "function_id": {
+              "$ref": "common.schema.json#/$defs/identifier"
+            }
+          }
+        },
+        "lineage_id": {
+          "$ref": "common.schema.json#/$defs/uuidv7",
+          "description": "Stable across a continue_as_new chain"
+        },
+        "chain_position": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "0 for the first run in a chain; increments on each continue_as_new"
+        },
+        "deadline": {
+          "$ref": "common.schema.json#/$defs/timestamp",
+          "description": "Run-level deadline from timeouts.run, if set"
+        }
+      }
+    },
+    "events": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "$ref": "event.schema.json"
+      }
+    },
+    "steps": {
+      "type": "object",
+      "description": "Map of step hash to recorded result. Only completed or terminally failed steps appear.",
+      "propertyNames": {
+        "$ref": "common.schema.json#/$defs/stepHash"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/recordedStep"
+      }
+    },
+    "state_truncated": {
+      "type": "boolean",
+      "default": false
+    },
+    "state_cursor": {
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "recordedStep": {
+      "type": "object",
+      "required": [
+        "id",
+        "op",
+        "status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "common.schema.json#/$defs/stepId"
+        },
+        "op": {
+          "enum": [
+            "step",
+            "sleep",
+            "wait_event",
+            "invoke",
+            "signal"
+          ]
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "failed",
+            "timed_out",
+            "cancelled",
+            "unknown"
+          ],
+          "description": "unknown means an attempt was abandoned mid-step; the step will re-execute"
+        },
+        "data": {
+          "$ref": "common.schema.json#/$defs/payload"
+        },
+        "error": {
+          "$ref": "common.schema.json#/$defs/error"
+        },
+        "timed_out": {
+          "type": "boolean"
+        },
+        "completed_at": {
+          "$ref": "common.schema.json#/$defs/timestamp"
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

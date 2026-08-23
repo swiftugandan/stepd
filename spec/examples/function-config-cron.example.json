@@ -1,0 +1,23 @@
+{
+  "id": "nightly-billing",
+  "name": "Nightly billing tick",
+  "description": "Bills the previous day. Occurrences each mean money, so catch-up is 'all' with a limit, and overlap is refused rather than queued.",
+  "triggers": [
+    {
+      "type": "cron",
+      "cron": "0 3 * * *",
+      "tz": "Europe/London",
+      "catchup": "all",
+      "catchup_limit": 7,
+      "misfire_window": "PT12H",
+      "singleton": true,
+      "run_key": "billing:nightly"
+    },
+    {
+      "type": "cron",
+      "cron": "*/15 9-17 * * 1-5",
+      "tz": "America/New_York",
+      "catchup": "skip"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "protocol": "1",
+  "ops": [
+    {
+      "op": "step",
+      "id": "fetch-invoice",
+      "hash": "1111111111111111",
+      "data": {
+        "id": "inv_1"
+      }
+    },
+    {
+      "op": "invoke",
+      "id": "score-risk",
+      "hash": "2222222222222222",
+      "function": "risk/score",
+      "input": {
+        "order": 4711
+      }
+    },
+    {
+      "op": "wait_event",
+      "id": "kyc",
+      "hash": "3333333333333333",
+      "event": "kyc.completed",
+      "since": "run_start",
+      "timeout": "P3D"
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stepd.dev/schemas/v1/blob-reserve.schema.json",
+  "title": "stepd blob reservation (two-phase direct upload)",
+  "$defs": {
+    "request": {
+      "type": "object",
+      "required": ["run_id", "size", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "run_id": { "$ref": "common.schema.json#/$defs/uuidv7" },
+        "step_id": { "$ref": "common.schema.json#/$defs/stepId" },
+        "size": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "content_type": { "type": "string", "maxLength": 255 },
+        "filename": { "type": "string", "maxLength": 256 }
+      }
+    },
+    "response": {
+      "type": "object",
+      "required": ["blob_id", "deduplicated"],
+      "additionalProperties": false,
+      "properties": {
+        "blob_id": { "$ref": "common.schema.json#/$defs/uuidv7" },
+        "deduplicated": {
+          "type": "boolean",
+          "description": "True when a blob with this digest already exists in the namespace. The app MUST skip the upload; upload_url is absent."
+        },
+        "upload_url": { "type": "string", "format": "uri" },
+        "method": { "enum": ["PUT", "POST"] },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Headers the app MUST send verbatim with the upload"
+        },
+        "expires_at": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "relay": {
+          "type": "boolean",
+          "default": false,
+          "description": "True when the store cannot presign and upload_url points at the server's fallback relay endpoint"
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "deduplicated": { "const": false } }, "required": ["deduplicated"] },
+          "then": { "required": ["upload_url", "method", "expires_at"] }
+        },
+        {
+          "if": { "properties": { "deduplicated": { "const": true } }, "required": ["deduplicated"] },
+          "then": { "not": { "required": ["upload_url"] } }
+        }
+      ]
+    }
+  }
+}

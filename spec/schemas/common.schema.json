@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stepd.dev/schemas/v1/common.schema.json",
+  "title": "stepd common definitions",
+  "$defs": {
+    "uuidv7": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}[Tt]\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?([Zz]|[+-]\\d{2}:\\d{2})$",
+      "description": "RFC 3339. Pattern is asserted so validators without format-checking still reject malformed values."
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^P(?!$)(\\d+Y)?(\\d+M)?(\\d+W)?(\\d+D)?(T(?=\\d)(\\d+H)?(\\d+M)?(\\d+(\\.\\d+)?S)?)?$"
+    },
+    "stepHash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "stepId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._/-]{0,127}$"
+    },
+    "cel": {
+      "type": "string",
+      "maxLength": 4096,
+      "description": "CEL expression, side-effect free"
+    },
+    "blobRef": {
+      "type": "object",
+      "required": [
+        "$blob"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "$blob": {
+          "type": "object",
+          "required": [
+            "id",
+            "size",
+            "sha256"
+          ],
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/uuidv7"
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "url": {
+              "type": "string",
+              "format": "uri",
+              "description": "Short-lived presigned read URL. Minted by the server on read; never supplied by the app, never persisted by SDKs."
+            },
+            "content_type": {
+              "type": "string"
+            },
+            "filename": {
+              "type": "string",
+              "maxLength": 256
+            }
+          }
+        }
+      }
+    },
+    "payload": {
+      "description": "A JSON value, a managed blob reference, or an external reference. An object bearing $blob or $ref MUST be a well-formed reference.",
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "required": [
+              "$blob"
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/blobRef"
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "required": [
+              "$ref"
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/externalRef"
+          }
+        },
+        {
+          "not": {
+            "type": "object",
+            "required": [
+              "$blob",
+              "$ref"
+            ]
+          }
+        }
+      ]
+    },
+    "error": {
+      "type": "object",
+      "required": [
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "stack": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "retry_after": {
+          "$ref": "#/$defs/duration"
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "data": {
+          "$ref": "#/$defs/payload"
+        }
+      }
+    },
+    "externalRef": {
+      "type": "object",
+      "description": "Pointer to an object the application owns. The server never fetches, validates or interprets it.",
+      "required": [
+        "$ref"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "$ref": {
+          "type": "object",
+          "required": [
+            "uri"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "uri": {
+              "type": "string",
+              "format": "uri",
+              "maxLength": 2048
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "content_type": {
+              "type": "string"
+            },
+            "filename": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "meta": {
+              "type": "object",
+              "description": "Opaque application metadata, e.g. duration, codec, page count"
+            }
+          }
+        }
+      }
+    }
+  }
+}

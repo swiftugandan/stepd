@@ -1,0 +1,376 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stepd.dev/schemas/v1/function-config.schema.json",
+  "title": "stepd FunctionConfig",
+  "type": "object",
+  "required": [
+    "id",
+    "triggers"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "version": {
+      "type": "string",
+      "maxLength": 64
+    },
+    "name": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "triggers": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/trigger"
+      }
+    },
+    "key_expr": {
+      "$ref": "common.schema.json#/$defs/cel"
+    },
+    "idempotency_expr": {
+      "$ref": "common.schema.json#/$defs/cel"
+    },
+    "priority_expr": {
+      "$ref": "common.schema.json#/$defs/cel"
+    },
+    "concurrency": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "required": [
+          "limit"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "key_expr": {
+            "$ref": "common.schema.json#/$defs/cel"
+          },
+          "scope": {
+            "enum": [
+              "function",
+              "namespace"
+            ],
+            "default": "function"
+          }
+        }
+      }
+    },
+    "rate_limit": {
+      "type": "object",
+      "required": [
+        "limit",
+        "period"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "period": {
+          "$ref": "common.schema.json#/$defs/duration"
+        },
+        "key_expr": {
+          "$ref": "common.schema.json#/$defs/cel"
+        },
+        "burst": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "debounce": {
+      "type": "object",
+      "required": [
+        "period"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "period": {
+          "$ref": "common.schema.json#/$defs/duration"
+        },
+        "key_expr": {
+          "$ref": "common.schema.json#/$defs/cel"
+        },
+        "max_delay": {
+          "$ref": "common.schema.json#/$defs/duration"
+        }
+      }
+    },
+    "batch": {
+      "type": "object",
+      "required": [
+        "max_size"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "max_size": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 1000
+        },
+        "timeout": {
+          "$ref": "common.schema.json#/$defs/duration"
+        },
+        "key_expr": {
+          "$ref": "common.schema.json#/$defs/cel"
+        }
+      }
+    },
+    "retries": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 4
+        },
+        "backoff": {
+          "enum": [
+            "exponential",
+            "linear",
+            "constant"
+          ],
+          "default": "exponential"
+        },
+        "initial": {
+          "$ref": "common.schema.json#/$defs/duration",
+          "default": "PT10S"
+        },
+        "max": {
+          "$ref": "common.schema.json#/$defs/duration",
+          "default": "PT1H"
+        },
+        "jitter": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "timeouts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "$ref": "common.schema.json#/$defs/duration",
+          "default": "PT60S"
+        },
+        "run": {
+          "$ref": "common.schema.json#/$defs/duration"
+        },
+        "start": {
+          "$ref": "common.schema.json#/$defs/duration"
+        }
+      }
+    },
+    "cancel_on": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "required": [
+          "event"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "event": {
+            "type": "string"
+          },
+          "expr": {
+            "$ref": "common.schema.json#/$defs/cel"
+          },
+          "timeout": {
+            "$ref": "common.schema.json#/$defs/duration"
+          }
+        }
+      }
+    },
+    "on_failure": {
+      "$ref": "common.schema.json#/$defs/identifier"
+    },
+    "singleton": {
+      "type": "boolean",
+      "default": false,
+      "description": "When true with key_expr, at most one active run per key; others queue FIFO"
+    },
+    "input_schema": {
+      "type": "object",
+      "description": "JSON Schema for invoke input"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "inbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_entries": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000,
+          "default": 1000
+        },
+        "on_overflow": {
+          "enum": [
+            "drop_oldest",
+            "fail_run"
+          ],
+          "default": "drop_oldest"
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "invoke_depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 10
+        },
+        "invoke_fanout": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1000
+        },
+        "chain_length": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 100000
+        },
+        "max_steps": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 10000
+        }
+      }
+    },
+    "on_cancel": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether this function has a compensation path. When true, a cancelled run receives one further attempt with run.cancelling set, so the handler can undo what it already did (\u00a77.4). Declared rather than inferred: dispatching a compensation attempt to a handler that has none hands it a normal-looking attempt and relies on it noticing."
+    }
+  },
+  "$defs": {
+    "trigger": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "event"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "event"
+            },
+            "event": {
+              "type": "string",
+              "minLength": 1
+            },
+            "expr": {
+              "$ref": "common.schema.json#/$defs/cel"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "cron"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "cron"
+            },
+            "cron": {
+              "type": "string"
+            },
+            "tz": {
+              "type": "string",
+              "default": "UTC"
+            },
+            "catchup": {
+              "enum": [
+                "one",
+                "skip",
+                "all"
+              ],
+              "default": "one"
+            },
+            "catchup_limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 10
+            },
+            "misfire_window": {
+              "$ref": "common.schema.json#/$defs/duration",
+              "default": "PT1H"
+            },
+            "singleton": {
+              "type": "boolean",
+              "default": false,
+              "description": "Skip a fire whose run_key already has an active run, rather than overlapping. Requires run_key: overlap control with nothing to be exclusive on would silently degrade to no overlap control."
+            },
+            "run_key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "The literal run key for fires from this schedule. A literal rather than a CEL expression because a cron fire has no event to evaluate against."
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "singleton": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "singleton"
+                ]
+              },
+              "then": {
+                "required": [
+                  "run_key"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "invoke"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

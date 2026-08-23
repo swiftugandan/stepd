@@ -1,0 +1,15 @@
+{
+  "protocol": "1",
+  "ops": [
+    { "op": "step", "id": "quote-air", "hash": "3f2a91c4b70e1d55",
+      "data": { "price_usd": 412.5 } },
+    { "op": "step", "id": "quote-rail", "hash": "aabbccddeeff0011",
+      "error": { "code": "carrier_unavailable",
+                 "message": "the rail carrier has withdrawn from this route" } },
+    { "op": "step", "id": "quote-road", "hash": "1122334455667788",
+      "data": { "price_usd": 380.0 } },
+    { "op": "error", "retryable": false, "step": "quote-rail",
+      "error": { "code": "carrier_unavailable",
+                 "message": "the rail carrier has withdrawn from this route" } }
+  ]
+}

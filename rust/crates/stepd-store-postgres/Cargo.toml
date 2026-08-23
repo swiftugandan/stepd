@@ -1,0 +1,31 @@
+[package]
+name = "stepd-store-postgres"
+description = "PostgreSQL implementation of the stepd engine interfaces. Pooler-safe: row-level locking only, no session-scoped advisory locks."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+stepd-proto.workspace = true
+stepd-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+sqlx.workspace = true
+tracing.workspace = true
+tokio       = { workspace = true, features = ["fs", "rt"] }
+sha2.workspace = true
+hmac.workspace = true
+hex.workspace = true
+subtle.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+stepd-core = { workspace = true, features = ["testing"] }
+async-trait.workspace = true
+serde_json.workspace = true
+futures.workspace = true

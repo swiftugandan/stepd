@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stepd.dev/schemas/v1/attempt-response.schema.json",
+  "title": "stepd AttemptResponse (app to server)",
+  "type": "object",
+  "required": [
+    "protocol",
+    "ops"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "protocol": {
+      "const": "1"
+    },
+    "ops": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "$ref": "op.schema.json"
+      }
+    },
+    "emit": {
+      "type": "array",
+      "maxItems": 100,
+      "description": "Events published transactionally with the ops",
+      "items": {
+        "$ref": "event.schema.json"
+      }
+    },
+    "logs": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "required": [
+          "level",
+          "message"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "level": {
+            "enum": [
+              "trace",
+              "debug",
+              "info",
+              "warn",
+              "error"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 8192
+          },
+          "at": {
+            "$ref": "common.schema.json#/$defs/timestamp"
+          },
+          "step": {
+            "$ref": "common.schema.json#/$defs/stepId"
+          },
+          "fields": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "orphaned_steps": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Recorded hashes not encountered during this replay pass"
+        },
+        "replay_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "steps_replayed": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "title": "done and continue_as_new must appear alone",
+      "description": "Recording a step ends the pass, so a handler cannot both record a step and return. Ops alongside these mean a swallowed step result. `error` is deliberately absent: see PROTOCOL 5.2.2.",
+      "if": {
+        "properties": {
+          "ops": {
+            "contains": {
+              "properties": {
+                "op": {
+                  "enum": [
+                    "done",
+                    "continue_as_new"
+                  ]
+                }
+              },
+              "required": [
+                "op"
+              ]
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "ops": {
+            "maxItems": 1
+          }
+        }
+      }
+    },
+    {
+      "title": "a retryable error must appear alone",
+      "description": "Retrying re-executes; committing records what happened. One envelope cannot ask for both, so an SDK holding recorded ops and a retryable failure emits the ops alone and re-raises next attempt (PROTOCOL 5.2.2).",
+      "if": {
+        "properties": {
+          "ops": {
+            "contains": {
+              "properties": {
+                "op": {
+                  "const": "error"
+                },
+                "retryable": {
+                  "const": true
+                }
+              },
+              "required": [
+                "op"
+              ]
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "ops": {
+            "maxItems": 1
+          }
+        }
+      }
+    }
+  ]
+}

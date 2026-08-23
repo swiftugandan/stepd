@@ -1,0 +1,35 @@
+[package]
+name = "stepd-cli"
+description = "The stepd command line: serve, migrate, doctor, lint, dev and conformance."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "stepd"
+path = "src/main.rs"
+
+[dependencies]
+stepd-proto.workspace = true
+stepd-core.workspace = true
+stepd-server.workspace = true
+stepd-conformance.workspace = true
+stepd-store-postgres.workspace = true
+stepd-expr-cel.workspace = true
+stepd-transport-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+axum.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+sqlx.workspace = true
+humantime.workspace = true
+rand.workspace = true
+hex.workspace = true

@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>stepd console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter+Tight:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  /* Blueprint register: the console shows technical drawings of execution. */
+  --ground:#EEF1F5; --surface:#FFFFFF; --ink:#0F1723; --muted:#5B6577;
+  --line:#D5DCE5; --line-strong:#B6C1CE;
+  --running:#1D4ED8; --waiting:#B45309; --done:#0F7B57; --failed:#C0392B;
+  --sleeping:#6B7280; --quarantined:#7C3AED;
+  --grid: rgba(15,23,35,.045);
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--ground);
+  background-image:linear-gradient(var(--grid) 1px,transparent 1px),
+                   linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+  background-size:22px 22px;
+  color:var(--ink);
+  font-family:"Inter Tight",system-ui,sans-serif;
+  font-size:14px; line-height:1.45;
+}
+.mono{font-family:"IBM Plex Mono",ui-monospace,monospace}
+
+header{
+  background:var(--surface); border-bottom:1px solid var(--line-strong);
+  padding:14px 20px; display:flex; align-items:baseline; gap:16px;
+  position:sticky; top:0; z-index:10;
+}
+header h1{font-size:15px;font-weight:700;letter-spacing:-.01em;margin:0}
+header h1 span{color:var(--muted);font-weight:500}
+header .ns{
+  font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--muted);
+  border:1px solid var(--line); padding:2px 7px; border-radius:2px;
+}
+header nav{margin-left:auto;display:flex;gap:2px}
+header nav button{
+  font:inherit;font-size:13px;background:none;border:1px solid transparent;
+  padding:5px 11px;border-radius:3px;color:var(--muted);cursor:pointer;
+}
+header nav button:hover{background:var(--ground)}
+header nav button[aria-current="true"]{background:var(--ink);color:#fff}
+header nav button:focus-visible{outline:2px solid var(--running);outline-offset:1px}
+
+main{padding:20px;max-width:1180px;margin:0 auto}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:4px;margin-bottom:18px}
+.panel > h2{
+  font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);
+  margin:0;padding:11px 14px;border-bottom:1px solid var(--line);font-weight:600;
+}
+.panel .body{padding:14px}
+
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{
+  text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.08em;
+  color:var(--muted);font-weight:600;padding:9px 14px;border-bottom:1px solid var(--line);
+}
+td{padding:10px 14px;border-bottom:1px solid var(--line)}
+tbody tr{cursor:pointer}
+tbody tr:hover{background:var(--ground)}
+tbody tr:last-child td{border-bottom:none}
+
+.chip{
+  display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;
+  padding:2px 8px;border-radius:20px;letter-spacing:.01em;
+  font-family:"IBM Plex Mono",monospace;
+}
+.chip::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.s-running{color:var(--running);background:#1D4ED812}
+.s-sleeping{color:var(--sleeping);background:#6B728012}
+.s-waiting{color:var(--waiting);background:#B4530915}
+.s-completed{color:var(--done);background:#0F7B5712}
+.s-failed{color:var(--failed);background:#C0392B12}
+.s-cancelled{color:var(--muted);background:#5B657712}
+.s-quarantined{color:var(--quarantined);background:#7C3AED12}
+.s-pending{color:var(--muted);background:#5B657712}
+
+/* ---- SIGNATURE: the run timeline.
+   Most of a durable run's wall-clock is spent doing nothing. Rather than hide
+   that, the strip renders waits and sleeps as explicit elided spans, so an
+   operator sees at a glance where the time actually went. ---- */
+.timeline{display:flex;align-items:stretch;gap:3px;padding:4px 0 2px;min-height:52px;overflow-x:auto}
+.tl-step{
+  min-width:76px;border:1px solid var(--line-strong);border-radius:3px;
+  padding:6px 8px;background:var(--surface);position:relative;flex:0 0 auto;
+}
+.tl-step .id{font-size:11px;font-weight:600;white-space:nowrap}
+.tl-step .op{font-size:9.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;
+  font-family:"IBM Plex Mono",monospace}
+.tl-step.done{border-left:3px solid var(--done)}
+.tl-step.failed{border-left:3px solid var(--failed)}
+.tl-step.pending{border-left:3px solid var(--waiting);border-style:dashed}
+.tl-gap{
+  flex:0 0 auto;align-self:center;display:flex;align-items:center;gap:6px;
+  padding:0 9px;color:var(--muted);font-family:"IBM Plex Mono",monospace;font-size:10.5px;
+}
+.tl-gap .rule{display:block;width:26px;border-top:1px dashed var(--line-strong)}
+.tl-now{
+  flex:0 0 auto;align-self:stretch;border-left:2px solid var(--waiting);
+  padding-left:9px;display:flex;align-items:center;font-size:11px;color:var(--waiting);
+  font-weight:600;
+}
+
+.needs-human{
+  border:1px solid var(--waiting);border-left-width:3px;border-radius:3px;
+  background:#B453090A;padding:12px 14px;margin-bottom:14px;
+}
+.needs-human h3{margin:0 0 3px;font-size:13px;font-weight:600;color:var(--waiting)}
+.needs-human p{margin:0 0 10px;font-size:12.5px;color:var(--muted)}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+input[type=text]{
+  font:inherit;font-family:"IBM Plex Mono",monospace;font-size:12px;padding:6px 9px;
+  border:1px solid var(--line-strong);border-radius:3px;background:var(--surface);min-width:190px;
+}
+input:focus-visible,button:focus-visible{outline:2px solid var(--running);outline-offset:1px}
+button.act{
+  font:inherit;font-size:12.5px;font-weight:600;padding:6px 13px;border-radius:3px;
+  border:1px solid var(--ink);background:var(--ink);color:#fff;cursor:pointer;
+}
+button.act.ghost{background:transparent;color:var(--ink)}
+button.act:hover{opacity:.88}
+
+.kv{display:grid;grid-template-columns:auto 1fr;gap:5px 16px;font-size:12.5px}
+.kv dt{color:var(--muted)}
+.kv dd{margin:0;font-family:"IBM Plex Mono",monospace}
+.empty{padding:34px 14px;text-align:center;color:var(--muted);font-size:13px}
+.empty strong{display:block;color:var(--ink);font-weight:600;margin-bottom:3px}
+pre{background:var(--ground);border:1px solid var(--line);border-radius:3px;
+  padding:9px;font-family:"IBM Plex Mono",monospace;font-size:11.5px;overflow:auto;margin:0}
+.back{background:none;border:none;font:inherit;color:var(--muted);cursor:pointer;padding:0;
+  margin-bottom:12px;font-size:12.5px}
+.back:hover{color:var(--ink)}
+.stat{display:flex;gap:26px;flex-wrap:wrap}
+.stat div span{display:block;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.stat div b{font-family:"IBM Plex Mono",monospace;font-size:19px;font-weight:600}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--ink);
+  color:#fff;padding:9px 16px;border-radius:3px;font-size:13px;z-index:50}
+@media (prefers-reduced-motion:no-preference){
+  .tl-step.pending{animation:breathe 2.4s ease-in-out infinite}
+  @keyframes breathe{0%,100%{border-color:var(--waiting)}50%{border-color:var(--line-strong)}}
+}
+@media (max-width:640px){ main{padding:12px} td,th{padding:8px 10px} }
+</style>
+</head>
+<body>
+<header>
+  <h1>stepd <span>console</span></h1>
+  <span class="ns mono" id="ns">—</span>
+  <nav>
+    <button data-view="runs" aria-current="true">Runs</button>
+    <button data-view="queue">Queue</button>
+    <button data-view="dlq">Needs attention</button>
+  </nav>
+</header>
+<main id="main"><div class="empty">Loading…</div></main>
+
+<script>
+const API = location.origin;
+let TOKEN = new URLSearchParams(location.search).get("token") || "";
+let view = "runs", currentRun = null;
+
+const el = (h) => { const d=document.createElement("div"); d.innerHTML=h.trim(); return d.firstChild; };
+const uid = (s) => encodeURIComponent(String(s));
+const esc = (s) => String(s??"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+async function api(path, opts={}) {
+  const r = await fetch(API+path, {...opts, headers:{
+    "Authorization":"Bearer "+TOKEN, "Content-Type":"application/json", ...(opts.headers||{})}});
+  if (!r.ok) {
+    let p={}; try{p=await r.json()}catch(e){}
+    throw new Error(p.detail || p.title || ("HTTP "+r.status));
+  }
+  return r.json();
+}
+
+function toast(msg){
+  const t=el(`<div class="toast">${esc(msg)}</div>`); document.body.appendChild(t);
+  setTimeout(()=>t.remove(),2600);
+}
+
+function chip(s){ return `<span class="chip s-${esc(s)}">${esc(s)}</span>`; }
+
+function ago(iso){
+  if(!iso) return "—";
+  const s=(Date.now()-new Date(iso).getTime())/1000;
+  if(s<60) return Math.round(s)+"s ago";
+  if(s<3600) return Math.round(s/60)+"m ago";
+  if(s<86400) return Math.round(s/3600)+"h ago";
+  return Math.round(s/86400)+"d ago";
+}
+function dur(a,b){
+  if(!a||!b) return null;
+  const s=(new Date(b)-new Date(a))/1000;
+  if(s<1) return Math.round(s*1000)+"ms";
+  if(s<60) return s.toFixed(1)+"s";
+  if(s<3600) return Math.round(s/60)+"m";
+  if(s<86400) return Math.round(s/3600)+"h";
+  return Math.round(s/86400)+"d";
+}
+
+/* The timeline. Steps that did work render as blocks; time the run spent merely
+   waiting renders as an elided span, labelled with how long it actually was. */
+function timeline(run){
+  const steps=[...run.steps].sort((a,b)=>
+    (a.ended_at||"9999").localeCompare(b.ended_at||"9999"));
+  let out="", prevEnd=run.started_at;
+  for(const s of steps){
+    const gap=dur(prevEnd,s.ended_at);
+    const idle = s.op==="sleep" || s.op==="wait_event";
+    if(idle && gap) out+=`<div class="tl-gap"><i class="rule"></i>${esc(gap)} idle<i class="rule"></i></div>`;
+    // Fixed vocabulary, never user data — kept explicit so the class attribute
+    // can never carry anything from the API.
+    const cls = s.status==="completed" ? "done" : s.status==="pending" ? "pending" : "failed";
+    out+=`<div class="tl-step ${cls}" title="${esc(s.step_hash)}">
+        <div class="id">${esc(s.step_id)}</div>
+        <div class="op">${esc(s.op)}${s.attempts>1?" ·"+s.attempts+"×":""}</div></div>`;
+    if(s.ended_at) prevEnd=s.ended_at;
+  }
+  if(run.pending_waits.length){
+    const w=run.pending_waits[0];
+    out+=`<div class="tl-now">waiting for ${esc(w.event_type)} · ${esc(ago(run.started_at))}</div>`;
+  }
+  return out || `<div class="tl-gap">no steps recorded yet</div>`;
+}
+
+async function renderRuns(){
+  const d=await api("/v1/runs?limit=50");
+  const m=document.getElementById("main");
+  if(!d.items.length){
+    m.innerHTML=`<div class="panel"><div class="empty"><strong>No runs yet</strong>
+      Send an event to start one.</div></div>`; return;
+  }
+  m.innerHTML=`<div class="panel"><h2>Runs</h2><table>
+    <thead><tr><th>Run</th><th>Function</th><th>Key</th><th>Status</th>
+    <th>Attempts</th><th>Started</th></tr></thead><tbody>${
+    d.items.map(r=>`<tr data-id="${esc(r.id)}">
+      <td class="mono">${esc(r.id.slice(0,8))}</td>
+      <td>${esc(r.fn_id)}</td>
+      <td class="mono">${esc(r.key||"—")}</td>
+      <td>${chip(r.status)}</td>
+      <td class="mono">${r.attempt_no}</td>
+      <td>${esc(ago(r.started_at))}</td></tr>`).join("")}</tbody></table></div>`;
+  m.querySelectorAll("tbody tr").forEach(tr=>
+    tr.onclick=()=>openRun(tr.dataset.id));
+}
+
+async function openRun(id){
+  currentRun=id;
+  const r=await api("/v1/runs/"+uid(id));
+  const m=document.getElementById("main");
+  const w=r.pending_waits[0];
+  m.innerHTML=`
+    <button class="back">← All runs</button>
+    ${w?`<div class="needs-human">
+      <h3>Waiting for someone to act</h3>
+      <p>This run is paused until a <span class="mono">${esc(w.event_type)}</span> event
+         arrives. It has been waiting ${esc(ago(r.started_at))}. Sending the event here
+         continues the run from where it stopped.</p>
+      <div class="row">
+        <input type="text" id="wdata" value='{"by":"you"}' aria-label="Event data as JSON">
+        <button class="act" id="resolve">Send ${esc(w.event_type)}</button>
+      </div></div>`:""}
+    <div class="panel"><h2>Execution</h2><div class="body">
+      <div class="timeline">${timeline(r)}</div></div></div>
+    <div class="panel"><h2>Run</h2><div class="body">
+      <dl class="kv">
+        <dt>Run</dt><dd>${esc(r.id)}</dd>
+        <dt>Function</dt><dd>${esc(r.fn_id)}</dd>
+        <dt>Status</dt><dd>${chip(r.status)}</dd>
+        <dt>Key</dt><dd>${esc(r.key||"—")}</dd>
+        <dt>Chain position</dt><dd>${r.chain_position}</dd>
+        <dt>Unread events</dt><dd>${r.inbox_pending}</dd>
+        ${r.restored?`<dt>Restored</dt><dd>rewound by a restore — verify side effects</dd>`:""}
+      </dl>
+      <div class="row" style="margin-top:14px">
+        <button class="act ghost" id="cancel">Cancel run</button>
+        ${["failed","quarantined","cancelled"].includes(r.status)
+          ?`<button class="act" id="retry">Retry</button>`:""}
+      </div></div></div>
+    ${r.output?`<div class="panel"><h2>Result</h2><div class="body">
+       <pre>${esc(JSON.stringify(r.output,null,2))}</pre></div></div>`:""}
+    ${r.error?`<div class="panel"><h2>Error</h2><div class="body">
+       <pre>${esc(JSON.stringify(r.error,null,2))}</pre></div></div>`:""}`;
+
+  m.querySelector(".back").onclick=()=>{view="runs";render()};
+  const rb=m.querySelector("#resolve");
+  if(rb) rb.onclick=async()=>{
+    let data={}; try{data=JSON.parse(document.getElementById("wdata").value)}
+    catch(e){return toast("That isn't valid JSON")}
+    try{
+      await api(`/v1/runs/${uid(id)}/resolve-wait`,{method:"POST",
+        body:JSON.stringify({event_type:w.event_type,data})});
+      toast("Event sent — run continuing"); openRun(id);
+    }catch(e){toast(e.message)}
+  };
+  const cb=m.querySelector("#cancel");
+  if(cb) cb.onclick=async()=>{
+    try{ await api(`/v1/runs/${uid(id)}/cancel`,{method:"POST"});
+      toast("Run cancelled"); openRun(id);
+    }catch(e){toast(e.message)}
+  };
+  const rt=m.querySelector("#retry");
+  if(rt) rt.onclick=async()=>{
+    try{ await api(`/v1/runs/${uid(id)}/retry`,{method:"POST"});
+      toast("Run queued again"); openRun(id);
+    }catch(e){toast(e.message)}
+  };
+}
+
+async function renderQueue(){
+  const d=await api("/v1/queue/stats");
+  const m=document.getElementById("main");
+  if(!d.functions.length){
+    m.innerHTML=`<div class="panel"><div class="empty"><strong>Queue is empty</strong>
+      Nothing is waiting to be dispatched.</div></div>`; return;
+  }
+  m.innerHTML=`<div class="panel"><h2>Queue</h2><div class="body"><div class="stat">${
+    d.functions.map(f=>`<div><span>${esc(f.fn_id)}</span>
+      <b>${f.backlog}</b> queued · ${f.in_flight} running
+      ${f.oldest_seconds>60?` · oldest ${Math.round(f.oldest_seconds/60)}m`:""}</div>`).join("")
+  }</div></div></div>`;
+}
+
+async function renderDlq(){
+  const d=await api("/v1/dlq");
+  const m=document.getElementById("main");
+  if(!d.items.length){
+    m.innerHTML=`<div class="panel"><div class="empty"><strong>Nothing needs attention</strong>
+      No runs have failed or been quarantined.</div></div>`; return;
+  }
+  m.innerHTML=`<div class="panel"><h2>Needs attention</h2><table>
+    <thead><tr><th>Run</th><th>Function</th><th>Status</th><th>Error</th><th></th></tr></thead>
+    <tbody>${d.items.map(r=>`<tr data-id="${esc(r.id)}">
+      <td class="mono">${esc(r.id.slice(0,8))}</td>
+      <td>${esc(r.fn_id)}</td><td>${chip(r.status)}</td>
+      <td class="mono" style="font-size:11.5px">${esc((r.error&&r.error.message)||"—")}</td>
+      <td><button class="act ghost" data-retry="${esc(r.id)}">Retry</button></td>
+      </tr>`).join("")}</tbody></table></div>`;
+  m.querySelectorAll("[data-retry]").forEach(b=>b.onclick=async(e)=>{
+    e.stopPropagation();
+    try{ await api(`/v1/runs/${uid(b.dataset.retry)}/retry`,{method:"POST"});
+      toast("Run queued again"); renderDlq();
+    }catch(err){toast(err.message)}
+  });
+  m.querySelectorAll("tbody tr").forEach(tr=>tr.onclick=()=>openRun(tr.dataset.id));
+}
+
+async function render(){
+  try{
+    if(view==="runs") await renderRuns();
+    else if(view==="queue") await renderQueue();
+    else await renderDlq();
+  }catch(e){
+    document.getElementById("main").innerHTML=
+      `<div class="panel"><div class="empty"><strong>Couldn't load</strong>${esc(e.message)}
+       — check the token in the URL.</div></div>`;
+  }
+}
+
+document.querySelectorAll("header nav button").forEach(b=>b.onclick=()=>{
+  view=b.dataset.view; currentRun=null;
+  document.querySelectorAll("header nav button").forEach(x=>
+    x.setAttribute("aria-current", x===b ? "true":"false"));
+  render();
+});
+
+(async ()=>{
+  try{ const h=await fetch(API+"/v1/health").then(r=>r.json());
+       document.getElementById("ns").textContent = TOKEN ? "authenticated" : "no token"; }
+  catch(e){}
+  render();
+  setInterval(()=>{ if(currentRun) openRun(currentRun); else render(); }, 4000);
+})();
+</script>
+</body>
+</html>

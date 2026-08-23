@@ -1,0 +1,11 @@
+{
+  "blob_id": "01926f5a-2200-7aaa-8000-0123456789ab",
+  "deduplicated": false,
+  "upload_url": "https://blobs.example.com/ns/prod/01926f5a-2200-7aaa-8000-0123456789ab?sig=abc",
+  "method": "PUT",
+  "headers": {
+    "content-type": "image/png",
+    "x-amz-checksum-sha256": "47DEQ\u2026"
+  },
+  "expires_at": "2026-08-22T10:05:00Z"
+}

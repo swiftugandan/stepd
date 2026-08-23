@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stepd.dev/schemas/v1/problem.schema.json",
+  "title": "Problem Details (RFC 9457)",
+  "type": "object",
+  "properties": {
+    "type": { "type": "string", "format": "uri", "default": "about:blank" },
+    "title": { "type": "string" },
+    "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+    "detail": { "type": "string" },
+    "instance": { "type": "string", "format": "uri-reference" },
+    "code": { "type": "string", "description": "stepd stable error code, e.g. stale_fence" },
+    "run_id": { "$ref": "common.schema.json#/$defs/uuidv7" },
+    "op": { "type": "string" }
+  },
+  "required": ["title", "status"],
+  "additionalProperties": true
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stepd.dev/schemas/v1/event.schema.json",
+  "title": "stepd Event (CloudEvents 1.0, structured mode)",
+  "type": "object",
+  "required": ["specversion", "id", "source", "type"],
+  "properties": {
+    "specversion": { "const": "1.0" },
+    "id": { "type": "string", "minLength": 1 },
+    "source": { "type": "string", "format": "uri-reference", "minLength": 1 },
+    "type": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "time": { "type": "string", "format": "date-time" },
+    "subject": { "type": "string" },
+    "datacontenttype": { "type": "string", "default": "application/json" },
+    "dataschema": { "type": "string", "format": "uri" },
+    "data": {},
+    "data_base64": { "type": "string", "contentEncoding": "base64" },
+    "stepdkey": {
+      "type": "string", "maxLength": 512,
+      "description": "Extension: business key overriding the function's key_expr"
+    },
+    "stepdidempotency": {
+      "type": "string", "maxLength": 256,
+      "description": "Extension: ingest dedupe key within the namespace window"
+    },
+    "stepdrun": {
+      "type": "string",
+      "description": "Extension: originating run id, set on events emitted by a run"
+    },
+    "stepdstep": {
+      "type": "string",
+      "description": "Extension: originating step hash"
+    },
+    "stepdts": {
+      "type": "string", "format": "date-time",
+      "description": "Extension: scheduled delivery time for delayed events"
+    }
+  },
+  "not": { "required": ["data", "data_base64"] },
+  "additionalProperties": true
+}

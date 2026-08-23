@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stepd.dev/schemas/v1/conformance-manifest.schema.json",
+  "title": "stepd ConformanceManifest",
+  "description": "Served at GET {app_url}/.well-known/stepd-conformance by an app under test. `suites` is what the app claims to implement; a runner may not certify a level containing a suite the app did not declare.",
+  "type": "object",
+  "required": [
+    "protocol",
+    "suites"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "protocol": {
+      "const": "1"
+    },
+    "sdk": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "Language and version, for the report. Informational."
+    },
+    "suites": {
+      "type": "array",
+      "uniqueItems": true,
+      "description": "Suites this app implements every required function for. Declaring a suite it cannot satisfy is worse than omitting it: an omitted suite is reported as not declared, a declared one as failed.",
+      "items": {
+        "enum": [
+          "memoization",
+          "loops",
+          "determinism",
+          "parallel",
+          "sleep",
+          "wait",
+          "early_signal",
+          "invoke",
+          "cascade",
+          "continue_as_new",
+          "errors",
+          "cancel",
+          "abandonment",
+          "blobs",
+          "refs",
+          "fencing",
+          "signature",
+          "truncation",
+          "cron"
+        ]
+      }
+    },
+    "statically_prevented": {
+      "type": "array",
+      "uniqueItems": true,
+      "description": "Hazards this implementation makes unrepresentable rather than detectable at run time. The runner relays these as passed by construction and does not verify them, so the enum is closed: a runner must never be able to be told to skip an assertion by a value it does not recognise.",
+      "items": {
+        "enum": [
+          "offpath_claim"
+        ]
+      }
+    }
+  }
+}

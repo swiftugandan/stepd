@@ -1,0 +1,33 @@
+[package]
+name = "stepd-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "The stepd protocol conformance battery (protocol §12)."
+
+[dependencies]
+stepd-proto.workspace = true
+stepd-core.workspace = true
+stepd-store-postgres.workspace = true
+stepd-server.workspace = true
+stepd-transport-http.workspace = true
+stepd-sdk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["full"] }
+reqwest.workspace = true
+sqlx.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tracing.workspace = true
+axum.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

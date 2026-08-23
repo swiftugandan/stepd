@@ -1,0 +1,22 @@
+[package]
+name = "stepd-transport-http"
+description = "Signed HTTP push transport for stepd, with the egress policy that keeps an app-supplied URL from reaching cloud metadata."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+stepd-proto.workspace = true
+stepd-core.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+url = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

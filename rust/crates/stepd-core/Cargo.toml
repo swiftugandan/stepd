@@ -1,0 +1,30 @@
+[package]
+name = "stepd-core"
+description = "The stepd engine: dispatch loop, retry policy, circuit breaking and fairness. Generic over the storage and transport traits."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# In-memory doubles for every engine interface. Enabled by dependents' tests.
+testing = []
+
+[dependencies]
+stepd-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["time", "rt", "macros", "sync"] }
+rand.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+stepd-core = { path = ".", features = ["testing"] }

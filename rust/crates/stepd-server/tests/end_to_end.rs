@@ -1,0 +1,1180 @@
+//! The whole stack, end to end.
+//!
+//! A real `stepd-sdk` app on a real TCP socket, a real server with a real
+//! Postgres, real signed HTTP between them, and a workflow driven from an
+//! ingested event to a completed run.
+//!
+//! Everything else in this workspace tests one layer against fakes. This is the
+//! only test that can catch the failures that live *between* layers — a header
+//! the transport sends and the SDK does not read, a status code one side means
+//! differently from the other, an envelope that validates on one side and not
+//! the other. Those are exactly the failures that a well-tested set of
+//! components still ships with.
+//!
+//! Skipped, loudly, when `STEPD_TEST_DATABASE_URL` is unset.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+use stepd_sdk::prelude::*;
+use stepd_server::{Config, Server};
+use stepd_transport_http::EgressPolicy;
+use uuid::Uuid;
+
+/// Executions per (run, step).
+///
+/// Keyed by run id rather than a bare counter: every test in this file shares
+/// one process, several drive the same workflow, and they run concurrently. A
+/// global counter would make "the charge step ran once" a statement about the
+/// whole test binary, which is both wrong and intermittently wrong — the worst
+/// combination, because it fails on someone else's change.
+static EXECUTIONS: OnceLock<Mutex<HashMap<(Uuid, &'static str), usize>>> = OnceLock::new();
+
+fn record(run: Uuid, step: &'static str) {
+    *EXECUTIONS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .entry((run, step))
+        .or_insert(0) += 1;
+}
+
+fn executions(run: Uuid, step: &'static str) -> usize {
+    EXECUTIONS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .get(&(run, step))
+        .copied()
+        .unwrap_or(0)
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+struct Receipt {
+    tx: String,
+    carrier: String,
+    approved_by: String,
+}
+
+/// The workflow under test: a step, a parallel pair, a wait, another step.
+async fn order_fulfilment(ctx: &Ctx) -> StepResult<Receipt> {
+    let run_id = ctx.run().id;
+    let tx: String = ctx
+        .step("charge", || async move {
+            record(run_id, "charge");
+            Ok("ch_1".to_string())
+        })
+        .await?;
+
+    // A parallel pair, to prove the whole batch commits atomically and costs one
+    // attempt rather than two.
+    let invoice = ctx.step::<String, _, _>("fetch-invoice", || async { Ok("inv-9".into()) });
+    let risk = ctx.step::<i32, _, _>("score-risk", || async { Ok(17) });
+    let (_invoice, _risk) = ctx.join((invoice, risk)).await?;
+
+    let approval: Option<serde_json::Value> = ctx.wait_event("approval", "order.approved").await?;
+
+    let carrier: String = ctx
+        .step("ship", || async move {
+            record(run_id, "ship");
+            Ok("dhl".to_string())
+        })
+        .await?;
+
+    Ok(Receipt {
+        tx,
+        carrier,
+        approved_by: approval
+            .and_then(|v| v["by"].as_str().map(str::to_string))
+            .unwrap_or_else(|| "nobody".into()),
+    })
+}
+
+/// A cron-triggered workflow. Reads its occurrence from the run input, which is
+/// where a catch-up fire's *intended* time lives — `started_at` is when recovery
+/// happened, not what the schedule meant.
+async fn nightly_report(ctx: &Ctx) -> StepResult<String> {
+    let run_id = ctx.run().id;
+    let occurrence = ctx
+        .run()
+        .input
+        .as_ref()
+        .and_then(|v| v["cron"]["occurrence_at"].as_str())
+        .unwrap_or("missing")
+        .to_string();
+
+    let out: String = ctx
+        .step("summarise", move || {
+            let occurrence = occurrence.clone();
+            async move {
+                record(run_id, "summarise");
+                Ok(format!("report for {occurrence}"))
+            }
+        })
+        .await?;
+    Ok(out)
+}
+
+struct Fixture {
+    server: Arc<Server>,
+    namespace: String,
+    token: String,
+    base: String,
+    _app: tokio::task::JoinHandle<()>,
+}
+
+const SIGNING_KEY: &[u8] = b"end-to-end-signing-key";
+
+async fn fixture(label: &str) -> Option<Fixture> {
+    let database_url = std::env::var("STEPD_TEST_DATABASE_URL").ok()?;
+
+    // The app first: it needs a port before the server can be told about it.
+    let app_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let app_addr = app_listener.local_addr().unwrap();
+    let app_url = format!("http://{app_addr}");
+
+    let app = App::new("billing", app_url.clone())
+        .signing_key(SIGNING_KEY.to_vec())
+        .function(
+            Function::new("order-fulfilment")
+                .on_event("order.created")
+                .key("'order:' + string(event.data.order_id)")
+                .run(order_fulfilment),
+        )
+        .function(
+            Function::new("nightly-report")
+                .on_cron_with(
+                    "0 3 * * *",
+                    "Europe/London",
+                    CronOptions::default()
+                        .catchup_all(3)
+                        .misfire_window("PT6H")
+                        .singleton("nightly-report"),
+                )
+                .run(nightly_report),
+        );
+    let manifest = app.manifest();
+    let app_task = tokio::spawn(async move {
+        let _ = axum::serve(app_listener, app.router()).await;
+    });
+
+    let mut config = Config::from_env();
+    config.database_url = database_url;
+    // Managed blobs, into a per-fixture temporary root. The key must be set or
+    // the endpoints refuse everything, which is correct for a deployment that
+    // does not use them and useless for a test of the ones that do.
+    config.blob_key = SIGNING_KEY.to_vec();
+    config.blob_root =
+        std::env::temp_dir().join(format!("stepd-e2e-blobs-{}", Uuid::new_v4().simple()));
+    // Loopback, because the app under test is on this machine. Cloud metadata
+    // stays denied even here — the policy's own tests assert that.
+    config.egress = EgressPolicy::development();
+    config.default_keys = vec![SIGNING_KEY.to_vec()];
+    config.lease = chrono::Duration::seconds(30);
+    // No jitter: a test that sometimes waits an extra minute is a flaky test.
+    config.timer_jitter = chrono::Duration::zero();
+
+    // Bound before the server is built: a blob capability has to be signed
+    // against the address the app will really reach, and `bind` is `0.0.0.0` on
+    // any deployment that matters.
+    let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_addr = api_listener.local_addr().unwrap();
+    config.blob_base_url = format!("http://{api_addr}");
+
+    let server = Arc::new(Server::build(config).await.expect("server"));
+    server.migrate().await.expect("migrate");
+
+    let namespace = format!("e2e-{label}-{}", &Uuid::new_v4().simple().to_string()[..8]);
+    server
+        .state
+        .store
+        .ensure_namespace(&namespace)
+        .await
+        .unwrap();
+
+    let token = mint(&server, &namespace, "admin").await;
+
+    let router = server.router();
+    tokio::spawn(async move {
+        let _ = axum::serve(api_listener, router).await;
+    });
+
+    let base = format!("http://{api_addr}");
+
+    // Register the app through the real API, exactly as an SDK would at start-up.
+    let res = reqwest::Client::new()
+        .put(format!("{base}/v1/apps"))
+        .bearer_auth(&token)
+        .json(&manifest)
+        .send()
+        .await
+        .expect("register");
+    assert_eq!(
+        res.status(),
+        200,
+        "registration failed: {:?}",
+        res.text().await
+    );
+
+    Some(Fixture {
+        server,
+        namespace,
+        token,
+        base,
+        _app: app_task,
+    })
+}
+
+async fn mint(server: &Server, namespace: &str, role: &str) -> String {
+    let raw = Uuid::new_v4().simple().to_string();
+    sqlx::query(
+        "INSERT INTO tokens (id, ns, role, token_hash, name)
+         VALUES (gen_random_uuid(), $1, $2, $3, 'e2e')",
+    )
+    .bind(namespace)
+    .bind(role)
+    .bind(stepd_server::auth::token_hash(&raw))
+    .execute(server.state.store.pool())
+    .await
+    .unwrap();
+    raw
+}
+
+macro_rules! fixture_or_skip {
+    ($label:expr) => {
+        match fixture($label).await {
+            Some(f) => f,
+            None => {
+                eprintln!("SKIPPED: set STEPD_TEST_DATABASE_URL to run the end-to-end tests");
+                return;
+            }
+        }
+    };
+}
+
+/// Drive the namespace until the run finishes or the budget runs out.
+async fn drive_until_done(f: &Fixture, run: Uuid, max_ticks: u32) -> String {
+    use stepd_core::traits::StateStore;
+    for _ in 0..max_ticks {
+        f.server
+            .dispatcher
+            .tick_namespace(&f.namespace)
+            .await
+            .unwrap();
+        f.server.housekeeper.tick().await;
+        if let Some(s) = f.server.store_status(run).await {
+            if s.is_terminal() {
+                return format!("{s:?}").to_lowercase();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let s = f.server.state.store.run_status(run).await.unwrap();
+    panic!("run {run} did not finish; last status {s:?}");
+}
+
+/// Convenience for the status poll above.
+trait StatusExt {
+    async fn store_status(&self, run: Uuid) -> Option<stepd_proto::RunStatus>;
+}
+
+impl StatusExt for Server {
+    async fn store_status(&self, run: Uuid) -> Option<stepd_proto::RunStatus> {
+        use stepd_core::traits::StateStore;
+        self.state.store.run_status(run).await.ok().flatten()
+    }
+}
+
+async fn ingest(f: &Fixture, event_type: &str, data: serde_json::Value) -> serde_json::Value {
+    reqwest::Client::new()
+        .post(format!("{}/v1/events", f.base))
+        .bearer_auth(&f.token)
+        .json(&serde_json::json!([{
+            "specversion": "1.0",
+            "source": "/shop",
+            "type": event_type,
+            "data": data,
+        }]))
+        .send()
+        .await
+        .expect("ingest")
+        .json()
+        .await
+        .expect("ingest body")
+}
+
+async fn only_run(f: &Fixture) -> Uuid {
+    sqlx::query_scalar::<_, Uuid>("SELECT id FROM runs WHERE ns = $1 ORDER BY started_at LIMIT 1")
+        .bind(&f.namespace)
+        .fetch_one(f.server.state.store.pool())
+        .await
+        .expect("a run was created")
+}
+
+// ---------------------------------------------------------------- the test
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_event_drives_a_real_sdk_workflow_to_completion() {
+    let f = fixture_or_skip!("full");
+
+    let res = ingest(&f, "order.created", serde_json::json!({ "order_id": 4711 })).await;
+    assert_eq!(res["accepted"], 1);
+    assert_eq!(
+        res["runs_started"], 1,
+        "the trigger expression matched and started a run"
+    );
+
+    let run = only_run(&f).await;
+
+    // The key came from the function's CEL expression, evaluated at ingest.
+    let key: Option<String> = sqlx::query_scalar("SELECT key FROM runs WHERE id = $1")
+        .bind(run)
+        .fetch_one(f.server.state.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(key.as_deref(), Some("order:4711"));
+
+    // Drive to the wait.
+    for _ in 0..10 {
+        f.server
+            .dispatcher
+            .tick_namespace(&f.namespace)
+            .await
+            .unwrap();
+        f.server.housekeeper.tick().await;
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM waits WHERE run_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(run)
+        .fetch_one(f.server.state.store.pool())
+        .await
+        .unwrap();
+        if waiting > 0 {
+            break;
+        }
+    }
+
+    // Resolve it through the operator command, the same path the console uses.
+    let res = reqwest::Client::new()
+        .post(format!("{}/v1/runs/{run}/resolve-wait", f.base))
+        .bearer_auth(&f.token)
+        .json(&serde_json::json!({
+            "event_type": "order.approved",
+            "data": { "by": "priya" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200, "{:?}", res.text().await);
+
+    let status = drive_until_done(&f, run, 40).await;
+    assert_eq!(status, "completed");
+
+    let output: serde_json::Value = sqlx::query_scalar("SELECT output FROM runs WHERE id = $1")
+        .bind(run)
+        .fetch_one(f.server.state.store.pool())
+        .await
+        .unwrap();
+    let receipt: Receipt = serde_json::from_value(output).unwrap();
+    assert_eq!(
+        receipt,
+        Receipt {
+            tx: "ch_1".into(),
+            carrier: "dhl".into(),
+            approved_by: "priya".into()
+        }
+    );
+
+    // The property the whole system exists to provide.
+    assert_eq!(
+        executions(run, "charge"),
+        1,
+        "the charge step executed more than once across the run's attempts"
+    );
+    assert_eq!(executions(run, "ship"), 1);
+
+    // Four recorded steps, and the parallel pair really was one envelope: five
+    // steps would mean the join degraded into sequential awaits.
+    let steps: Vec<String> =
+        sqlx::query_scalar("SELECT step_id FROM run_steps WHERE run_id = $1 ORDER BY step_id")
+            .bind(run)
+            .fetch_all(f.server.state.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        steps,
+        vec!["approval", "charge", "fetch-invoice", "score-risk", "ship"]
+    );
+
+    let attempts: i32 = sqlx::query_scalar("SELECT attempt_no FROM runs WHERE id = $1")
+        .bind(run)
+        .fetch_one(f.server.state.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        attempts, 5,
+        "expected charge, the parallel pair, the wait, ship, done — one attempt each"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_event_arriving_before_the_wait_still_resolves_it() {
+    // The early-signal race, over the real stack: the approval is ingested while
+    // the run is still on its first step, long before `wait_event` registers.
+    let f = fixture_or_skip!("early");
+
+    ingest(&f, "order.created", serde_json::json!({ "order_id": 5000 })).await;
+    let run = only_run(&f).await;
+
+    // Deliver the approval immediately, before a single attempt has run.
+    use stepd_core::traits::EventLog;
+    let delivery = f
+        .server
+        .state
+        .store
+        .deliver(
+            run,
+            "order.approved",
+            &serde_json::json!({ "by": "early" }),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        delivery,
+        stepd_core::traits::Delivery::Buffered,
+        "no wait is registered yet, so the event must be buffered, not dropped"
+    );
+
+    let status = drive_until_done(&f, run, 40).await;
+    assert_eq!(status, "completed");
+
+    let output: serde_json::Value = sqlx::query_scalar("SELECT output FROM runs WHERE id = $1")
+        .bind(run)
+        .fetch_one(f.server.state.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        output["approved_by"], "early",
+        "the buffered event resolved the wait when it was finally registered"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_duplicate_event_does_not_start_a_second_run() {
+    let f = fixture_or_skip!("dedupe");
+
+    let body = serde_json::json!([{
+        "specversion": "1.0", "source": "/shop", "type": "order.created",
+        "data": { "order_id": 6000 }, "stepdidempotency": "order-6000"
+    }]);
+    let client = reqwest::Client::new();
+    for _ in 0..3 {
+        let res: serde_json::Value = client
+            .post(format!("{}/v1/events", f.base))
+            .bearer_auth(&f.token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let _ = res;
+    }
+
+    let runs: i64 = sqlx::query_scalar("SELECT count(*) FROM runs WHERE ns = $1")
+        .bind(&f.namespace)
+        .fetch_one(f.server.state.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        runs, 1,
+        "an idempotency key must survive the whole ingest path"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_token_cannot_see_another_namespace() {
+    // F-SEC-1: namespace isolation is enforced in the query, so a token for one
+    // namespace cannot observe that another exists — not even by run id.
+    let f = fixture_or_skip!("isolation");
+    ingest(&f, "order.created", serde_json::json!({ "order_id": 7000 })).await;
+    let run = only_run(&f).await;
+
+    let other_ns = format!("other-{}", &Uuid::new_v4().simple().to_string()[..8]);
+    f.server
+        .state
+        .store
+        .ensure_namespace(&other_ns)
+        .await
+        .unwrap();
+    let other_token = mint(&f.server, &other_ns, "admin").await;
+
+    let client = reqwest::Client::new();
+
+    let res = client
+        .get(format!("{}/v1/runs/{run}", f.base))
+        .bearer_auth(&other_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        404,
+        "a foreign run must look absent, not forbidden — 403 would confirm the id is real"
+    );
+
+    let res = client
+        .post(format!("{}/v1/runs/{run}/cancel", f.base))
+        .bearer_auth(&other_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        404,
+        "and it must not be cancellable across the boundary"
+    );
+
+    let listed: serde_json::Value = client
+        .get(format!("{}/v1/runs", f.base))
+        .bearer_auth(&other_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        listed["items"].as_array().unwrap().len(),
+        0,
+        "the list must be empty, not filtered after the fact"
+    );
+
+    // …and the legitimate token still works.
+    let res = client
+        .get(format!("{}/v1/runs/{run}", f.base))
+        .bearer_auth(&f.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unauthenticated_request_is_refused_but_health_is_not() {
+    let f = fixture_or_skip!("auth");
+    let client = reqwest::Client::new();
+
+    assert_eq!(
+        client
+            .get(format!("{}/v1/runs", f.base))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        client
+            .get(format!("{}/v1/runs", f.base))
+            .bearer_auth("not-a-real-token")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    // A health check that needs a token is one more thing to get wrong in a
+    // deployment, and it reveals nothing.
+    assert_eq!(
+        client
+            .get(format!("{}/v1/health", f.base))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_viewer_can_read_but_not_command() {
+    let f = fixture_or_skip!("roles");
+    ingest(&f, "order.created", serde_json::json!({ "order_id": 8000 })).await;
+    let run = only_run(&f).await;
+
+    let viewer = mint(&f.server, &f.namespace, "viewer").await;
+    let client = reqwest::Client::new();
+
+    assert_eq!(
+        client
+            .get(format!("{}/v1/runs/{run}", f.base))
+            .bearer_auth(&viewer)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        client
+            .post(format!("{}/v1/runs/{run}/cancel", f.base))
+            .bearer_auth(&viewer)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403,
+        "here 403 is right: the caller can see the run, they just may not cancel it"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_command_is_audited() {
+    // An audit log with exceptions answers "who cancelled this run?" with
+    // "someone".
+    let f = fixture_or_skip!("audit");
+    ingest(&f, "order.created", serde_json::json!({ "order_id": 9000 })).await;
+    let run = only_run(&f).await;
+
+    reqwest::Client::new()
+        .post(format!("{}/v1/runs/{run}/cancel", f.base))
+        .bearer_auth(&f.token)
+        .send()
+        .await
+        .unwrap();
+
+    let logged: Vec<String> =
+        sqlx::query_scalar("SELECT command FROM commands_audit WHERE ns = $1 AND target = $2")
+            .bind(&f.namespace)
+            .bind(run.to_string())
+            .fetch_all(f.server.state.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(logged, vec!["cancel_run"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_console_is_served_with_a_strict_csp() {
+    let f = fixture_or_skip!("console");
+    let res = reqwest::Client::new().get(&f.base).send().await.unwrap();
+    assert_eq!(res.status(), 200);
+    let csp = res
+        .headers()
+        .get("content-security-policy")
+        .expect("the console must carry a CSP: it renders arbitrary payload JSON")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(csp.contains("script-src 'nonce-"));
+    assert!(!csp.contains("script-src 'unsafe-inline'"));
+    assert!(res.text().await.unwrap().contains("stepd console"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_app_manifest_is_discoverable_and_registration_is_idempotent() {
+    let f = fixture_or_skip!("discovery");
+
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM functions WHERE ns = $1")
+        .bind(&f.namespace)
+        .fetch_one(f.server.state.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        before, 2,
+        "the fixture registers an event and a cron function"
+    );
+
+    // Re-register the same manifest. Registration is idempotent by
+    // (app_id, function.id); a second call must not duplicate the function.
+    let app = App::new("billing", "http://127.0.0.1:1/")
+        .signing_key(SIGNING_KEY.to_vec())
+        .function(
+            Function::new("order-fulfilment")
+                .on_event("order.created")
+                .key("'order:' + string(event.data.order_id)")
+                .run(order_fulfilment),
+        )
+        .function(
+            Function::new("nightly-report")
+                .on_cron_with(
+                    "0 3 * * *",
+                    "Europe/London",
+                    CronOptions::default()
+                        .catchup_all(3)
+                        .misfire_window("PT6H")
+                        .singleton("nightly-report"),
+                )
+                .run(nightly_report),
+        );
+    let res = reqwest::Client::new()
+        .put(format!("{}/v1/apps", f.base))
+        .bearer_auth(&f.token)
+        .json(&app.manifest())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM functions WHERE ns = $1")
+        .bind(&f.namespace)
+        .fetch_one(f.server.state.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(after, 2, "re-registration must update, not duplicate");
+
+    // …and the same for schedules. An upsert that inserted instead would give
+    // the function two identical schedules and fire it twice per occurrence,
+    // gaining one more on every deploy.
+    let schedules: i64 = sqlx::query_scalar("SELECT count(*) FROM cron_schedules WHERE ns = $1")
+        .bind(&f.namespace)
+        .fetch_one(f.server.state.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(schedules, 1, "re-registration must not duplicate schedules");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn registering_an_app_the_egress_policy_refuses_fails_at_registration() {
+    // At registration, where a human sees the error — not at the first attempt,
+    // where it becomes a mysterious run failure.
+    let f = fixture_or_skip!("egress");
+
+    let manifest = serde_json::json!({
+        "protocol": "1",
+        "app_id": "evil",
+        "url": "http://169.254.169.254/",
+        "functions": [{ "id": "f", "triggers": [{ "type": "event", "event": "x" }] }]
+    });
+    let res = reqwest::Client::new()
+        .put(format!("{}/v1/apps", f.base))
+        .bearer_auth(&f.token)
+        .json(&manifest)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["code"], "egress_denied");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bad_expression_is_rejected_at_registration_not_at_the_first_event() {
+    // Deferring expression compilation to the ingest path makes a typo in a
+    // predicate surface as a log line at the first matching event — and the
+    // function simply never runs, which is indistinguishable from a predicate
+    // that legitimately did not match.
+    let f = fixture_or_skip!("expr");
+
+    let manifest = serde_json::json!({
+        "protocol": "1",
+        "app_id": "billing",
+        "url": "http://127.0.0.1:1/",
+        "functions": [{
+            "id": "broken",
+            "triggers": [{ "type": "event", "event": "x",
+                           "expr": "event.data.tags.all(t, t == 'a')" }]
+        }]
+    });
+    let res = reqwest::Client::new()
+        .put(format!("{}/v1/apps", f.base))
+        .bearer_auth(&f.token)
+        .json(&manifest)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["code"], "bad_expression");
+    assert!(
+        body["detail"].as_str().unwrap().contains("all"),
+        "the error must name the unsupported construct, not just say 'invalid': {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_recorded_key_digest_reflects_a_key_the_server_actually_holds() {
+    // The column previously held a hash of the app *id*: a value shaped exactly
+    // like a key digest that verified nothing, from which an operator would
+    // reasonably conclude a key was configured when none was.
+    let f = fixture_or_skip!("keydigest");
+
+    let stored: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT key_hash_current FROM app_bindings WHERE ns = $1 AND app_id = 'billing'",
+    )
+    .bind(&f.namespace)
+    .fetch_one(f.server.state.store.pool())
+    .await
+    .unwrap();
+
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        stored,
+        Some(Sha256::digest(SIGNING_KEY).to_vec()),
+        "the digest must be of the signing key in force, not of anything else"
+    );
+    assert_ne!(
+        stored,
+        Some(Sha256::digest(b"billing").to_vec()),
+        "and specifically not a hash of the app id"
+    );
+}
+
+#[tokio::test]
+async fn a_cron_function_registers_schedules_and_runs_when_they_fire() {
+    let f = fixture_or_skip!("cron");
+
+    // Registration happened in the fixture, through the real API. The first
+    // assertion is that it produced a schedule at all: for the whole life of
+    // this project `on_cron` registered a trigger and nothing scheduled it, and
+    // every test passed, because a function that never fires fails nothing.
+    let listed: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/v1/schedules", f.base))
+        .bearer_auth(&f.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let schedules = listed["schedules"].as_array().unwrap();
+    assert_eq!(schedules.len(), 1, "the cron trigger produced a schedule");
+    let s = &schedules[0];
+    assert_eq!(s["fn_id"], "nightly-report");
+    assert_eq!(s["cron"], "0 3 * * *");
+    assert_eq!(s["tz"], "Europe/London");
+    // The options the SDK set survived the round trip through the manifest,
+    // the JSON schema and the database. ADR-016 noted these existed in the
+    // protocol with no way for the Rust SDK to set them.
+    assert_eq!(s["catchup"], "all");
+    assert_eq!(s["catchup_limit"], 3);
+    assert_eq!(s["misfire_window_secs"], 21_600);
+    assert_eq!(s["singleton"], true);
+    assert!(!s["paused"].as_bool().unwrap());
+
+    // Bring the fire time forward, as an outage would.
+    sqlx::query(
+        "UPDATE cron_schedules SET next_fire_at = now() - interval '10 seconds' WHERE ns = $1",
+    )
+    .bind(&f.namespace)
+    .execute(f.server.state.store.pool())
+    .await
+    .unwrap();
+
+    // The housekeeping pass fires it; the dispatcher executes it. Both through
+    // the real loops, against the real app, over signed HTTP.
+    f.server.housekeeper.tick().await;
+
+    let run: Uuid =
+        sqlx::query_scalar("SELECT id FROM runs WHERE ns = $1 AND fn_id = 'nightly-report'")
+            .bind(&f.namespace)
+            .fetch_one(f.server.state.store.pool())
+            .await
+            .expect("the schedule created a run");
+
+    let status = drive_until_done(&f, run, 60).await;
+    assert_eq!(status, "completed", "the cron run executed and completed");
+    assert_eq!(
+        executions(run, "summarise"),
+        1,
+        "the step ran exactly once, as for any other run"
+    );
+
+    // The run knows which occurrence it is for. A handler that read the wall
+    // clock instead would misdate a catch-up fire's output with nothing to
+    // notice it by (ADR-016, "what we accept").
+    let output: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT output FROM runs WHERE id = $1")
+            .bind(run)
+            .fetch_one(f.server.state.store.pool())
+            .await
+            .unwrap();
+    let text = output.unwrap().as_str().unwrap_or_default().to_string();
+    assert!(
+        text.starts_with("report for 20"),
+        "the handler read its occurrence from the run input, got {text:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_bad_cron_expression_is_refused_at_registration() {
+    let f = fixture_or_skip!("badcron");
+
+    // The point of the whole exercise. A cron expression that cannot be
+    // scheduled must fail the deploy, where a person is watching — not register
+    // cleanly and produce a function that never runs, which is what happened
+    // before and which nothing anywhere reports.
+    for (expr, why) in [
+        ("0 3 * * 9", "day-of-week out of range"),
+        ("0 0 L * *", "a dialect extension"),
+        ("0 3 * *", "four fields"),
+    ] {
+        let manifest = serde_json::json!({
+            "protocol": "1", "app_id": "billing", "url": "http://127.0.0.1:9/",
+            "functions": [{
+                "id": "broken",
+                "triggers": [{ "type": "cron", "cron": expr }]
+            }]
+        });
+        let res = reqwest::Client::new()
+            .put(format!("{}/v1/apps", f.base))
+            .bearer_auth(&f.token)
+            .json(&manifest)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400, "'{expr}' ({why}) should be refused");
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(body["code"], "bad_cron", "and say which thing was wrong");
+    }
+
+    // An unknown zone too: falling back to UTC would keep the schedule firing,
+    // at a time nobody chose.
+    let manifest = serde_json::json!({
+        "protocol": "1", "app_id": "billing", "url": "http://127.0.0.1:9/",
+        "functions": [{
+            "id": "broken",
+            "triggers": [{ "type": "cron", "cron": "0 3 * * *", "tz": "Mars/Olympus_Mons" }]
+        }]
+    });
+    let res = reqwest::Client::new()
+        .put(format!("{}/v1/apps", f.base))
+        .bearer_auth(&f.token)
+        .json(&manifest)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400, "an unknown time zone is refused");
+}
+
+#[tokio::test]
+async fn a_paused_schedule_can_be_resumed_through_the_api() {
+    let f = fixture_or_skip!("resume");
+
+    // Corrupt the row the way a vanished tzdata zone would, and let the sweep
+    // find it.
+    sqlx::query(
+        "UPDATE cron_schedules SET expr = 'not a cron', \
+                next_fire_at = now() - interval '1 minute' WHERE ns = $1",
+    )
+    .bind(&f.namespace)
+    .execute(f.server.state.store.pool())
+    .await
+    .unwrap();
+    f.server.housekeeper.tick().await;
+
+    let listed: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/v1/schedules", f.base))
+        .bearer_auth(&f.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let s = &listed["schedules"][0];
+    assert_eq!(s["paused"], true);
+    assert!(
+        s["last_error"].is_string(),
+        "the endpoint says why, so an operator need not read the logs"
+    );
+    let id = s["id"].as_str().unwrap().to_string();
+
+    // Resuming while still broken must fail, and say so. Reporting success and
+    // pausing again on the next sweep would be the worst of both.
+    let res = reqwest::Client::new()
+        .post(format!("{}/v1/schedules/{id}/resume", f.base))
+        .bearer_auth(&f.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400, "resuming a still-broken schedule fails");
+
+    sqlx::query("UPDATE cron_schedules SET expr = '0 3 * * *' WHERE ns = $1")
+        .bind(&f.namespace)
+        .execute(f.server.state.store.pool())
+        .await
+        .unwrap();
+
+    let res = reqwest::Client::new()
+        .post(format!("{}/v1/schedules/{id}/resume", f.base))
+        .bearer_auth(&f.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200, "a fixed schedule resumes");
+
+    let listed: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/v1/schedules", f.base))
+        .bearer_auth(&f.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["schedules"][0]["paused"], false);
+    assert!(listed["schedules"][0]["last_error"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_blob_round_trips_through_the_real_transfer_endpoints() {
+    // The two routes that existed only as a store and a capability minter until
+    // now. Everything beneath them was built and tested; nothing mounted them,
+    // so a `$blob` was a shape an app could not actually produce.
+    let f = fixture_or_skip!("blobs");
+
+    let run: Uuid = sqlx::query_scalar(
+        "INSERT INTO runs (id, ns, fn_id, lineage_id, status)
+         VALUES (gen_random_uuid(), $1, 'blob-holder', gen_random_uuid(), 'pending')
+         RETURNING id",
+    )
+    .bind(&f.namespace)
+    .fetch_one(f.server.state.store.pool())
+    .await
+    .unwrap();
+
+    let payload = b"conformance blob payload".to_vec();
+    let digest = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&payload));
+    let http = reqwest::Client::new();
+
+    // Phase one: reserve.
+    let res = http
+        .post(format!("{}/v1/blobs:reserve", f.base))
+        .bearer_auth(&f.token)
+        .json(&serde_json::json!({
+            "run_id": run, "size": payload.len(), "sha256": digest,
+            "content_type": "text/plain"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 201, "{:?}", res.text().await);
+    let reservation: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(reservation["deduplicated"], false);
+    let upload_url = reservation["upload_url"].as_str().unwrap().to_string();
+    let blob_id = reservation["blob_id"].as_str().unwrap().to_string();
+
+    // Phase two: upload. No bearer token — the capability in the URL is the
+    // authorisation, which is the whole reason an app that holds only an upload
+    // URL can use it.
+    let up = http
+        .put(&upload_url)
+        .body(payload.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(up.status(), 201, "{:?}", up.text().await);
+
+    // Reserving the identical digest again must skip the upload entirely.
+    let again: serde_json::Value = http
+        .post(format!("{}/v1/blobs:reserve", f.base))
+        .bearer_auth(&f.token)
+        .json(&serde_json::json!({
+            "run_id": run, "size": payload.len(), "sha256": digest
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(again["deduplicated"], true);
+    assert_eq!(again["blob_id"], blob_id);
+    assert!(
+        again["upload_url"].is_null(),
+        "a deduplicated reservation must carry no upload URL; an app that saw one \
+         would upload bytes that already exist"
+    );
+
+    // Read it back, in full and by range, through the presigned URL.
+    use stepd_core::traits::BlobStore;
+    let read_url = f
+        .server
+        .state
+        .blobs
+        .as_ref()
+        .expect("blobs enabled")
+        .presign_read(blob_id.parse().unwrap(), chrono::Duration::seconds(60))
+        .await
+        .unwrap();
+
+    let whole = http.get(&read_url).send().await.unwrap();
+    assert_eq!(whole.status(), 200);
+    assert_eq!(whole.bytes().await.unwrap().to_vec(), payload);
+
+    let head = http
+        .get(&read_url)
+        .header("range", "bytes=0-10")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        head.status(),
+        206,
+        "§8.3.3 requires Range so a step can read a header without pulling the object"
+    );
+    assert_eq!(head.bytes().await.unwrap().to_vec(), payload[0..11]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_blob_capability_cannot_be_repurposed() {
+    // The signature covers the direction and the size, so a leaked write URL is
+    // not a read URL and not a licence to store more than was reserved. Both
+    // failures would be silent: the transfer would simply succeed.
+    let f = fixture_or_skip!("blobcap");
+
+    let run: Uuid = sqlx::query_scalar(
+        "INSERT INTO runs (id, ns, fn_id, lineage_id, status)
+         VALUES (gen_random_uuid(), $1, 'blob-holder', gen_random_uuid(), 'pending')
+         RETURNING id",
+    )
+    .bind(&f.namespace)
+    .fetch_one(f.server.state.store.pool())
+    .await
+    .unwrap();
+
+    let payload = b"eight!!!".to_vec();
+    let digest = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&payload));
+    let http = reqwest::Client::new();
+
+    let reservation: serde_json::Value = http
+        .post(format!("{}/v1/blobs:reserve", f.base))
+        .bearer_auth(&f.token)
+        .json(&serde_json::json!({
+            "run_id": run, "size": payload.len(), "sha256": digest
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let upload_url = reservation["upload_url"].as_str().unwrap().to_string();
+
+    // More bytes than were reserved.
+    let too_big = http
+        .put(&upload_url)
+        .body(b"considerably more than eight bytes".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        too_big.status(),
+        400,
+        "a write capability must not accept more than the size it was signed for"
+    );
+
+    // The same capability, pointed at reading.
+    let repurposed = upload_url.replace("dir=write", "dir=read");
+    let read = http.get(&repurposed).send().await.unwrap();
+    assert!(
+        !read.status().is_success(),
+        "a write capability must not be usable for reading; the direction is inside \
+         the signature precisely so this cannot be edited"
+    );
+}

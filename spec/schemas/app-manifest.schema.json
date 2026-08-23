@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stepd.dev/schemas/v1/app-manifest.schema.json",
+  "title": "stepd AppManifest",
+  "type": "object",
+  "required": ["protocol", "app_id", "url", "functions"],
+  "additionalProperties": false,
+  "properties": {
+    "protocol": { "const": "1" },
+    "app_id": { "$ref": "common.schema.json#/$defs/identifier" },
+    "url": { "type": "string", "format": "uri" },
+    "sdk": { "type": "string", "pattern": "^[a-z0-9_-]+/[0-9A-Za-z.+-]+$" },
+    "checksum": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "env": { "type": "string", "maxLength": 64 },
+    "capabilities": {
+      "type": "array",
+      "items": { "enum": ["parallel", "blobs", "signal", "invoke", "batch", "cancel", "streaming"] }
+    },
+    "functions": {
+      "type": "array", "minItems": 0, "maxItems": 1000,
+      "items": { "$ref": "function-config.schema.json" }
+    }
+  }
+}

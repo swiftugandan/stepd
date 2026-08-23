@@ -1,0 +1,16 @@
+{
+  "protocol": "1",
+  "sdk": "rust/0.1.0",
+  "suites": [
+    "memoization",
+    "loops",
+    "determinism",
+    "sleep",
+    "errors",
+    "abandonment",
+    "signature"
+  ],
+  "statically_prevented": [
+    "offpath_claim"
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "protocol": "1",
+  "app_id": "billing",
+  "url": "https://billing.internal/stepd",
+  "sdk": "rust/0.3.1",
+  "checksum": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "env": "prod",
+  "capabilities": ["parallel", "blobs", "invoke", "cancel"],
+  "functions": [
+    {
+      "id": "order-fulfilment",
+      "version": "3",
+      "name": "Order fulfilment",
+      "triggers": [
+        { "type": "event", "event": "order.created", "expr": "event.data.total > 0" },
+        { "type": "cron", "cron": "0 3 * * *", "tz": "Europe/London" }
+      ],
+      "key_expr": "'order:' + string(event.data.order_id)",
+      "singleton": true,
+      "concurrency": [ { "limit": 20 }, { "limit": 1, "key_expr": "event.data.tenant" } ],
+      "rate_limit": { "limit": 100, "period": "PT1M" },
+      "retries": { "max_attempts": 4, "backoff": "exponential", "initial": "PT10S", "max": "PT1H", "jitter": true },
+      "timeouts": { "attempt": "PT60S", "run": "P30D" },
+      "cancel_on": [ { "event": "order.cancelled", "expr": "event.data.order_id == 4711" } ],
+      "on_failure": "order-fulfilment-alert"
+    }
+  ]
+}

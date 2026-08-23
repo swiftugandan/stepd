@@ -1,0 +1,29 @@
+[package]
+name = "stepd-sdk"
+description = "Rust SDK for stepd: function builder, handler context, axum adapter and an in-process test harness."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+reqwest.workspace = true
+stepd-proto.workspace = true
+stepd-sdk-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "macros", "sync"] }
+axum.workspace = true
+hex.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

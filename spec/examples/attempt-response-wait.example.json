@@ -1,0 +1,17 @@
+{
+  "protocol": "1",
+  "ops": [
+    { "op": "wait_event", "id": "approval", "hash": "c0ff3312aa10bb47",
+      "event": "order.approved",
+      "expr": "event.data.order_id == 4711",
+      "timeout": "P7D",
+      "prompt": {
+        "title": "Approve refund of £42.00",
+        "detail": { "amount": 4200, "reason": "damaged in transit" },
+        "actions": [
+          { "label": "Approve", "event": "order.approved", "data": { "order_id": 4711 } },
+          { "label": "Reject",  "event": "order.rejected", "data": { "order_id": 4711 } }
+        ]
+      } }
+  ]
+}
