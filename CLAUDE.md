@@ -14,15 +14,16 @@ cargo build --workspace
 cargo test --workspace          # needs STEPD_TEST_DATABASE_URL (see below)
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p stepd-cli -- dev       # server + console, migrations, a token
-cargo run -p stepd-cli -- doctor    # 13 checks, non-zero on anything critical
+cargo run -p stepd-cli -- doctor    # non-zero exit on anything critical
 ```
 
-Protocol schemas, from `spec/` — needs `jsonschema>=4.18` in a venv, because the
-system package is older and shadows it (issue #12):
+Protocol schemas, from `spec/` — needs a recent `jsonschema` in a virtualenv,
+because the system package is older, lacks the `registry=` argument the
+validator uses, and shadows a plain `pip install`:
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install 'jsonschema>=4.18' referencing
-.venv/bin/python validate.py        # 54 cases
+.venv/bin/python validate.py
 ```
 
 ## Postgres
@@ -37,8 +38,8 @@ export STEPD_TEST_DATABASE_URL="postgres://postgres@127.0.0.1:5433/stepd_rust"
 
 **The SQL suites and the Rust tests need separate databases.** `psql -f
 migrations/*.sql` and `stepd migrate` keep different ideas of what has been
-applied; both against one database leaves sqlx starting from migration 1 against
-objects that already exist.
+applied; both against one database leaves sqlx starting from the first migration
+against objects that already exist.
 
 **Without `STEPD_TEST_DATABASE_URL` the database tests skip loudly.** A green run
 that skipped them is not a green run.
@@ -46,28 +47,31 @@ that skipped them is not a green run.
 ## Rules that exist because something broke
 
 - **Per-instance state never goes in a `static`.** In `stepd-conformance` it goes
-  in `AppState`. Three components have now made this mistake independently
-  (README findings 2 and 13); nothing in the build catches a fourth (issue #8).
+  in `AppState`. Separate components have made this mistake independently, each
+  time by two tests interfering through shared mutable state, and nothing in the
+  build catches the next one.
 - **`ctx.step()` claims when called, not when polled.** Claiming at poll time
   ties the hash to scheduler order and `join!` silently re-executes completed
   work. Same rule for `wait_event` and `invoke`. See
-  [`docs/SDK-DESIGN-rust.md`](docs/SDK-DESIGN-rust.md) and ADR-012.
-- **The commit path lives in SQL.** `tests/sql/test_invariants.sql` fails the
+  [`docs/SDK-DESIGN-rust.md`](docs/SDK-DESIGN-rust.md) and the
+  [eager occurrence claiming](docs/adr/012-eager-occurrence-claiming.md) ADR.
+- **The commit path lives in SQL.** `rust/tests/sql/test_invariants.sql` fails the
   build if a serialization point moves. Don't reimplement commit logic in the
-  Rust store — that is how three live defects hid (ADR-011, ADR-019).
+  Rust store — a second correctness centre is where live defects hid while the
+  tests guarded the first.
 - **Don't overstate in docs or comments.** A comment describing a property the
-  code lacks is worse than none (README finding 9).
+  code lacks is worse than none: it stops the next reader checking.
 
 ## Where to read
 
 | | |
 |---|---|
-| [`README.md`](README.md) | Status, honest gaps, the 17 findings |
+| [`README.md`](README.md) | Status, honest gaps, and the findings behind them |
 | [`rust/README.md`](rust/README.md) | Crate graph, test layout, running the server |
 | [`spec/PROTOCOL.md`](spec/PROTOCOL.md) | The wire protocol |
-| [`docs/adr/`](docs/adr/) | 22 ADRs; 011, 012 and 019 are the silent-corruption ones |
+| [`docs/adr/`](docs/adr/) | ADRs; the silent-corruption ones are eager occurrence claiming, the durable run inbox and pooler-safe locking |
 | [`docs/runbooks/restore-hazard.md`](docs/runbooks/restore-hazard.md) | Read before you need it: PITR re-executes side effects |
 | [`docs/GAPS.md`](docs/GAPS.md) | Gap register — note it records spec resolutions, not always code |
 
 Open gaps are tracked as [issues](https://github.com/swiftugandan/stepd/issues),
-labelled `gap` with the register's S1–S4 severities.
+labelled `gap` with the register's severities.
