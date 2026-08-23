@@ -114,9 +114,14 @@ jobs:
           workspaces: rust
 
       - name: protocol schemas
+        # In a virtualenv, and pinned. ubuntu-latest ships jsonschema 4.10 in
+        # dist-packages, which satisfies an unpinned `pip install jsonschema`
+        # and then fails on the `registry=` argument the validator needs. That
+        # is why this step had never actually validated anything.
         run: |
-          pip install jsonschema referencing
-          python3 validate.py
+          python3 -m venv .venv
+          .venv/bin/pip install --disable-pip-version-check -r requirements.txt
+          .venv/bin/python validate.py
         working-directory: spec
 
       - name: SQL behaviour and structural invariants

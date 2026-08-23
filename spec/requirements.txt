@@ -1,0 +1,8 @@
+# Pinned because the validator uses `Draft202012Validator(..., registry=...)`,
+# which landed in jsonschema 4.18. ubuntu-latest ships python3-jsonschema 4.10
+# in dist-packages, and a plain `pip install jsonschema` is satisfied by it —
+# so the validator raised TypeError on every CI run from the first one until
+# this file existed. Install into a virtualenv so the system package cannot
+# shadow the pinned one.
+jsonschema>=4.18
+referencing
