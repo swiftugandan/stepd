@@ -137,7 +137,8 @@ async fn main() -> Result<()> {
         Command::Doctor => {
             let server = build(database_url, None).await?;
             println!("\nstepd doctor\n");
-            let findings = doctor::run(server.state.store.pool()).await;
+            let findings =
+                doctor::run(server.state.store.pool(), &server.config.blob_backend).await;
             if doctor::report(&findings) {
                 // A non-zero exit so this is usable as a deployment gate rather
                 // than something a human has to read and interpret.
@@ -233,9 +234,16 @@ async fn build(database_url: String, bind: Option<String>) -> Result<Server> {
     if let Some(b) = bind {
         config.bind = b;
     }
+    // Two independent things can fail here now: the database connection, and
+    // (checked first, so it fails without touching the network) a
+    // half-configured blob backend. A single "check STEPD_DATABASE_URL"
+    // context would send an operator chasing the database for a bucket name
+    // that was never set, so the underlying error — which already names
+    // exactly what is wrong — is left to speak for itself instead of being
+    // captioned with a guess.
     Server::build(config)
         .await
-        .context("could not connect to the database; check STEPD_DATABASE_URL")
+        .context("could not build the server")
 }
 
 async fn serve(database_url: String, bind: String, migrate: bool, dev_mode: bool) -> Result<()> {

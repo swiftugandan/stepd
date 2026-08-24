@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use stepd_sdk::prelude::*;
-use stepd_server::{Config, Server};
+use stepd_server::{BlobBackendConfig, Config, Server};
 use stepd_transport_http::EgressPolicy;
 use uuid::Uuid;
 
@@ -165,8 +165,9 @@ async fn fixture(label: &str) -> Option<Fixture> {
     // the endpoints refuse everything, which is correct for a deployment that
     // does not use them and useless for a test of the ones that do.
     config.blob_key = SIGNING_KEY.to_vec();
-    config.blob_root =
-        std::env::temp_dir().join(format!("stepd-e2e-blobs-{}", Uuid::new_v4().simple()));
+    config.blob_backend = BlobBackendConfig::Filesystem {
+        root: std::env::temp_dir().join(format!("stepd-e2e-blobs-{}", Uuid::new_v4().simple())),
+    };
     // Loopback, because the app under test is on this machine. Cloud metadata
     // stays denied even here — the policy's own tests assert that.
     config.egress = EgressPolicy::development();
@@ -330,8 +331,9 @@ async fn fixture_with_presigning_backend() -> Option<PresigningFixture> {
     // still builds a `FilesystemBackend` internally before it is replaced
     // below, and that construction needs a path even though nothing is
     // written under it.
-    config.blob_root =
-        std::env::temp_dir().join(format!("stepd-e2e-presign-{}", Uuid::new_v4().simple()));
+    config.blob_backend = BlobBackendConfig::Filesystem {
+        root: std::env::temp_dir().join(format!("stepd-e2e-presign-{}", Uuid::new_v4().simple())),
+    };
     config.egress = EgressPolicy::development();
 
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

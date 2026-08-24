@@ -73,7 +73,12 @@ impl Finding {
 }
 
 /// Run every check.
-pub async fn run(pool: &PgPool) -> Vec<Finding> {
+///
+/// `blob_backend` is the server's configured backend, not read from the
+/// database: an S3 misconfiguration is exactly the kind of thing that keeps
+/// the main server from starting at all, and `doctor` has to be runnable then
+/// too (module docs). The check it drives lives beside `orphaned_blobs`.
+pub async fn run(pool: &PgPool, blob_backend: &stepd_server::BlobBackendConfig) -> Vec<Finding> {
     let mut out = Vec::new();
     out.push(schema_version(pool).await);
     out.push(structural_invariants(pool).await);
@@ -82,6 +87,9 @@ pub async fn run(pool: &PgPool) -> Vec<Finding> {
     out.push(partition_lag(pool).await);
     out.push(stuck_leases(pool).await);
     out.push(orphaned_blobs(pool).await);
+    if let stepd_server::BlobBackendConfig::S3(s3) = blob_backend {
+        out.push(s3_bucket_reachable(s3).await);
+    }
     out.push(unreachable_apps(pool).await);
     out.push(inbox_overflow(pool).await);
     out.push(quarantined_runs(pool).await);
@@ -327,6 +335,45 @@ async fn orphaned_blobs(pool: &PgPool) -> Finding {
             "these are paid-for bytes nothing references; run the blob collector",
         ),
         Err(e) => Finding::warn("blobs", e.to_string(), ""),
+    }
+}
+
+/// Whether the configured S3 bucket is there and these credentials can use it.
+///
+/// Wrong credentials or an unreachable endpoint today surface only when an
+/// app's first upload fails — a `blob_backend_unavailable` three systems away
+/// from whoever configured them. This is a `HeadBucket`, not a write, so it is
+/// safe to run against a bucket the server should not be able to write to
+/// either, and it is what lets an operator learn the answer at the same
+/// moment they learn everything else `doctor` checks.
+async fn s3_bucket_reachable(cfg: &stepd_blobs_s3::S3Config) -> Finding {
+    let backend = match stepd_blobs_s3::S3Backend::new(cfg.clone()) {
+        Ok(b) => b,
+        Err(e) => {
+            return Finding::critical(
+                "blob-store",
+                format!("S3 backend configuration is unusable: {e}"),
+                "check STEPD_BLOB_S3_ENDPOINT; see docs/blob-backends.md for object stores \
+                 this backend has been verified against",
+            )
+        }
+    };
+    match backend.check_bucket().await {
+        stepd_blobs_s3::BucketCheck::Reachable => {
+            Finding::ok("blob-store", "S3 bucket reachable and authorised")
+        }
+        stepd_blobs_s3::BucketCheck::Forbidden => Finding::critical(
+            "blob-store",
+            "S3 bucket reachable, but the configured credentials were refused (403)",
+            "check STEPD_BLOB_S3_ACCESS_KEY and STEPD_BLOB_S3_SECRET_KEY; see \
+             docs/blob-backends.md for object stores this backend has been verified against",
+        ),
+        stepd_blobs_s3::BucketCheck::Unreachable(detail) => Finding::critical(
+            "blob-store",
+            format!("S3 bucket unreachable: {detail}"),
+            "check STEPD_BLOB_S3_ENDPOINT, STEPD_BLOB_S3_PATH_STYLE and network egress; see \
+             docs/blob-backends.md for object stores this backend has been verified against",
+        ),
     }
 }
 
