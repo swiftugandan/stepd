@@ -909,7 +909,59 @@ check those five lines by hand.
 
 ---
 
-## Execution Handoff
+---
 
-Plan complete and saved to
-`docs/superpowers/plans/2026-08-24-s3-twelve-factor.md`.
+## Execution record — 2026-08-24
+
+**Task 1: done** — `8ea7f03`. `STEPD_BLOB_S3_PUBLIC_ENDPOINT` presigns
+against the address apps reach. The Step 4 risk the self-review flagged was
+checked by introducing the exact mutation (`stored` → `presign`) and
+confirming `this_process_calls_the_endpoint_even_when_apps_are_sent_elsewhere`
+goes red, naming the wrong host in its failure. Two deviations from the plan:
+a fifth `S3ConfigInput` literal in `end_to_end.rs:1609` the File Structure
+table missed, and `BlobBackendConfig::S3` needed boxing once the second
+`EndpointInput` pushed the variant past clippy's `large_enum_variant`
+threshold.
+
+**Task 2: done** — `56aeafb`. `STEPD_BLOB_S3_SESSION_TOKEN` reaches the SigV4
+signature. Empty filtered to `None`; token kept out of both `Debug` impls,
+asserted by a test on each; the absent refresh documented in `.env.example`
+and `docs/blob-backends.md`.
+
+**Task 3: STOPPED AT THE GUARD — needs a separately reviewed PR.**
+
+`Edit` on `.github/workflows/ci.yml` was refused by the harness hook:
+
+```
+Blocked: '.github/workflows/ci.yml' is part of the factory harness.
+Hooks, CI, runner, and ownership rules require a separately reviewed PR.
+```
+
+That is the guard working, and the plan's Global Constraints say to stop
+rather than reach the file another way. Nothing was written to it.
+
+**What was verified, so the reviewer does not have to take the lane on
+faith.** The lane's *content* was run locally against the exact pinned image
+it names, `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z`:
+
+- `cargo test -p stepd-blobs-s3` — 6 live tests **ran**, 0 skipped, all
+  passed, including `the_store_refuses_bytes_that_do_not_match_the_declared_digest`
+  and `a_committed_object_reports_its_digest_without_transferring_it`.
+- `cargo test -p stepd-server --test end_to_end no_object_bytes` —
+  `no_object_bytes_reach_the_server_on_the_s3_path` **ran** and passed. This is
+  the BR-19 evidence the README says is produced nowhere automatically.
+
+Neither printed its `SKIPPED:` notice, which is the thing that makes a green
+run meaningful here.
+
+**To land it.** The patch is `git show 4f519a1 -- .github/workflows/ci.yml`,
+and it was confirmed to `git apply --check` cleanly against `56aeafb`. Apply
+it, then make the three comment corrections in Task 3 Step 6 above **in the
+same PR** — the verbatim replacement text for each is there. They are correct
+as they stand *today* and become false the moment the lane merges, so they
+must not be changed before it does.
+
+One portability note found while verifying: the health-check loop uses
+`timeout`, which is absent from macOS by default. Irrelevant to the lane —
+it runs on `ubuntu-latest`, where `timeout` is present — but a local
+reproduction needs a `for`-loop instead.
