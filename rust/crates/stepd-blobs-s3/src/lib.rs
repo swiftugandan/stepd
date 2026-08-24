@@ -58,10 +58,12 @@ const INTERNAL_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 /// How long this backend waits to establish a connection to the object store.
 ///
 /// See [`REQUEST_TIMEOUT`] for why both of these exist and why they are
-/// constants. Separate from it because the failure they catch is different: a
-/// DROPping firewall or a stale NAT entry stalls the *handshake*, and a
-/// connect timeout is the only thing that bounds it — `reqwest` applies
-/// neither by default.
+/// constants. [`REQUEST_TIMEOUT`] already bounds the whole request,
+/// connecting included, and would eventually catch a stalled handshake too —
+/// but only at its budget. A DROPping firewall or a stale NAT entry stalls
+/// the *handshake* specifically, and a shorter bound on just that phase fails
+/// fast on it instead of waiting out the full request budget for something
+/// that was never going to answer. `reqwest` applies neither by default.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How long this backend waits for a whole metadata request to finish.
