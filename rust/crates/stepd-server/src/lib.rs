@@ -630,7 +630,7 @@ impl Server {
             default_keys: config.default_keys.clone(),
         });
 
-        let dispatcher = Arc::new(Dispatcher::new(
+        let dispatcher = Dispatcher::new(
             store.clone(),
             store.clone(),
             transport.clone(),
@@ -642,11 +642,20 @@ impl Server {
                 timer_jitter: config.timer_jitter,
                 ..Default::default()
             },
-        ));
+        );
 
         // Managed blobs are optional. A server with no blob signing key still
         // runs every other path; it simply refuses the two transfer endpoints,
         // which is honest and is what the doctor reports.
+        //
+        // When they are configured the dispatcher gets the same store, because
+        // protocol §8.3.2 makes the op commit the point at which a `$blob` is
+        // verified and becomes readable. On a backend that presigns it is the
+        // only point: the bytes never touch this process.
+        let dispatcher = Arc::new(match &blobs {
+            Some(b) => dispatcher.with_blob_store(b.clone()),
+            None => dispatcher,
+        });
 
         let housekeeper = Arc::new(Housekeeper::new(
             store.clone(),

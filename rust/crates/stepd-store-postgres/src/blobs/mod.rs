@@ -41,6 +41,16 @@ use crate::db;
 mod filesystem;
 pub use filesystem::FilesystemBackend;
 
+/// Re-exported from the engine, where it now lives.
+///
+/// What a `$blob` looks like and where one may appear is protocol §8.3.1, not a
+/// property of this store, and the engine needs the same walk to verify
+/// references before it commits them (§8.3.2). Two copies would be two things to
+/// keep in step, and the recursion is the part that would drift: a `$blob`
+/// nested in an array inside an object is the ordinary payload shape, not a
+/// corner case.
+pub use stepd_core::blob_ids;
+
 /// Blob index in Postgres; bytes and transfer URLs come from a [`BlobBackend`].
 ///
 /// The server builds a [`FilesystemBackend`] and passes it to
@@ -376,55 +386,71 @@ impl BlobStore for PostgresBlobStore {
 
         let declared_size: i64 = row.get("size");
         let declared_digest: Vec<u8> = row.get("sha256");
+        let state: String = row.get("state");
 
-        // Verify before the blob becomes readable. Without this a compromised
-        // upload URL could substitute different content for a reference that has
-        // already been committed into a step result, and every later read of that
-        // step would return the substituted bytes with no sign anything changed.
-        let stored = self
-            .backend
-            .stored(id)
-            .await?
-            .ok_or_else(|| Error::NotFound(format!("no such blob {id}")))?;
+        // Committing an already-committed blob is a no-op, not an error and not
+        // a second look at the bytes. Two callers commit now: the relay
+        // endpoint, as soon as it has stored the bytes, and the dispatcher, for
+        // every reference in an envelope it is about to record. On a relay
+        // deployment the second always follows the first, and every replay of a
+        // recorded step brings the dispatcher back here for the same id.
+        //
+        // Skipping the work is safe because `state='committed'` is itself the
+        // record that verification passed: the only statement in this crate that
+        // sets it is the `UPDATE` below, on the far side of the digest check.
+        // Re-running the check would cost a `HeadObject` per reference on an
+        // object-storage backend, and a full re-read of the object on the
+        // filesystem one, which reaches the `None` arm and hashes the bytes.
+        if state != "committed" {
+            // Verify before the blob becomes readable. Without this a compromised
+            // upload URL could substitute different content for a reference that has
+            // already been committed into a step result, and every later read of that
+            // step would return the substituted bytes with no sign anything changed.
+            let stored = self
+                .backend
+                .stored(id)
+                .await?
+                .ok_or_else(|| Error::NotFound(format!("no such blob {id}")))?;
 
-        if stored.size != declared_size {
-            return Err(Error::Config(format!(
-                "blob_digest_mismatch: {id} declared {declared_size} bytes, stored {}",
-                stored.size
-            )));
-        }
+            if stored.size != declared_size {
+                return Err(Error::Config(format!(
+                    "blob_digest_mismatch: {id} declared {declared_size} bytes, stored {}",
+                    stored.size
+                )));
+            }
 
-        match stored.sha256 {
-            // The backend read the digest from metadata; no bytes to read here.
-            Some(digest) => {
-                if digest != hex::encode(&declared_digest) {
-                    return Err(Error::Config(format!(
-                        "blob_digest_mismatch: {id} content does not match the declared sha256"
-                    )));
+            match stored.sha256 {
+                // The backend read the digest from metadata; no bytes to read here.
+                Some(digest) => {
+                    if digest != hex::encode(&declared_digest) {
+                        return Err(Error::Config(format!(
+                            "blob_digest_mismatch: {id} content does not match the declared sha256"
+                        )));
+                    }
+                }
+                // Only the filesystem backend reaches this branch: it cannot answer
+                // "what is this object's sha256" without reading the bytes, so it
+                // says so via `None` rather than lying or hashing eagerly inside
+                // `stored`. A presigning backend answering `None` here would mean
+                // digest verification silently moved back into the control plane,
+                // defeating the reason bytes bypass it in the first place.
+                None => {
+                    let bytes = self.get_bytes(id, None).await?;
+                    let actual = Sha256::digest(&bytes);
+                    if actual.as_slice() != declared_digest.as_slice() {
+                        return Err(Error::Config(format!(
+                            "blob_digest_mismatch: {id} content does not match the declared sha256"
+                        )));
+                    }
                 }
             }
-            // Only the filesystem backend reaches this branch: it cannot answer
-            // "what is this object's sha256" without reading the bytes, so it
-            // says so via `None` rather than lying or hashing eagerly inside
-            // `stored`. A presigning backend answering `None` here would mean
-            // digest verification silently moved back into the control plane,
-            // defeating the reason bytes bypass it in the first place.
-            None => {
-                let bytes = self.get_bytes(id, None).await?;
-                let actual = Sha256::digest(&bytes);
-                if actual.as_slice() != declared_digest.as_slice() {
-                    return Err(Error::Config(format!(
-                        "blob_digest_mismatch: {id} content does not match the declared sha256"
-                    )));
-                }
-            }
-        }
 
-        sqlx::query("UPDATE blobs SET state='committed', committed_at=now() WHERE id=$1")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(db)?;
+            sqlx::query("UPDATE blobs SET state='committed', committed_at=now() WHERE id=$1")
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(db)?;
+        }
 
         Ok(BlobRef {
             id,
@@ -525,34 +551,6 @@ impl BlobStore for PostgresBlobStore {
     }
 }
 
-/// Walk a JSON value and collect every `$blob` id it references.
-///
-/// Used on commit to build the reference graph, and on read to know which
-/// references need a fresh URL minted. Recursive over arrays and objects because
-/// a step result is arbitrary JSON and a blob can be nested anywhere in it.
-pub fn blob_ids(value: &serde_json::Value, out: &mut Vec<Uuid>) {
-    match value {
-        serde_json::Value::Object(m) => {
-            if let Some(b) = m.get("$blob") {
-                if let Some(id) = b.get("id").and_then(|v| v.as_str()) {
-                    if let Ok(u) = Uuid::parse_str(id) {
-                        out.push(u);
-                    }
-                }
-            }
-            for v in m.values() {
-                blob_ids(v, out);
-            }
-        }
-        serde_json::Value::Array(a) => {
-            for v in a {
-                blob_ids(v, out);
-            }
-        }
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,22 +605,6 @@ mod tests {
         assert!(url.contains(&id.to_string()));
         let sig = url.split("sig=").nth(1).unwrap();
         assert!(c.verify(id, "read", 42, expires.timestamp(), sig).is_ok());
-    }
-
-    #[test]
-    fn blob_references_are_found_wherever_they_are_nested() {
-        let id = Uuid::now_v7();
-        let v = serde_json::json!({
-            "receipts": [ { "file": { "$blob": { "id": id, "size": 1, "sha256": "ab" } } } ],
-            "note": "no blob here"
-        });
-        let mut out = vec![];
-        blob_ids(&v, &mut out);
-        assert_eq!(
-            out,
-            vec![id],
-            "a blob nested in an array inside an object must be found"
-        );
     }
 
     #[test]

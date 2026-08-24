@@ -10,7 +10,7 @@ use crate::traits::*;
 use crate::{Error, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use stepd_proto::*;
@@ -824,6 +824,105 @@ impl CronStore for MemCron {
     async fn trim_fires(&self, _max: i64) -> Result<u64> {
         self.trims.fetch_add(1, Ordering::Relaxed);
         Ok(0)
+    }
+}
+
+/// A [`BlobStore`] double for the dispatcher's verification path.
+///
+/// Only `commit_blob` is modelled, because it is the only method the dispatcher
+/// calls. The rest are `unimplemented!` rather than faked, so a test that starts
+/// to depend on one fails loudly instead of passing against a fiction.
+///
+/// It does model one thing the real store's contract requires: committing an
+/// already-committed blob returns its reference without re-verifying. That makes
+/// this double an executable statement of the contract, not evidence that
+/// `PostgresBlobStore` honours it — the live test
+/// `committing_an_already_committed_blob_does_not_look_at_the_object_again` in
+/// `stepd-store-postgres/tests/live.rs` is what checks the implementation.
+///
+/// Every field is per-instance state, never a `static`: two tests sharing one
+/// mutable set of committed ids is the interference this codebase has been
+/// bitten by more than once.
+#[derive(Default)]
+pub struct MemBlobs {
+    /// Ids whose verification fails as a digest mismatch.
+    mismatched: Mutex<HashSet<Uuid>>,
+    /// Ids that are already readable.
+    committed: Mutex<HashSet<Uuid>>,
+    /// Calls that got as far as verifying.
+    pub verifications: AtomicU64,
+    /// Calls that returned early because the blob was already committed.
+    pub skipped: AtomicU64,
+}
+
+impl MemBlobs {
+    /// A store holding nothing, in which every blob verifies.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// A store in which `id` is reserved and fails verification.
+    pub fn mismatching(id: Uuid) -> Arc<Self> {
+        Arc::new(Self {
+            mismatched: Mutex::new([id].into_iter().collect()),
+            ..Default::default()
+        })
+    }
+
+    /// A store in which `id` has already been committed — the state the relay
+    /// path leaves behind before the ops carrying the reference are returned.
+    pub fn already_committed(id: Uuid) -> Arc<Self> {
+        Arc::new(Self {
+            committed: Mutex::new([id].into_iter().collect()),
+            ..Default::default()
+        })
+    }
+
+    /// Whether `id` is readable.
+    pub fn is_committed(&self, id: Uuid) -> bool {
+        self.committed.lock().unwrap().contains(&id)
+    }
+}
+
+#[async_trait]
+impl BlobStore for MemBlobs {
+    async fn reserve(&self, _ns: &str, _spec: BlobSpec) -> Result<Reservation> {
+        unimplemented!("the dispatcher never reserves")
+    }
+
+    async fn commit_blob(&self, id: Uuid) -> Result<BlobRef> {
+        let reference = BlobRef {
+            id,
+            size: 1,
+            sha256: "ab".into(),
+            content_type: None,
+            filename: None,
+            url: None,
+        };
+        if self.is_committed(id) {
+            self.skipped.fetch_add(1, Ordering::Relaxed);
+            return Ok(reference);
+        }
+        self.verifications.fetch_add(1, Ordering::Relaxed);
+        if self.mismatched.lock().unwrap().contains(&id) {
+            return Err(Error::Config(format!(
+                "blob_digest_mismatch: {id} content does not match the declared sha256"
+            )));
+        }
+        self.committed.lock().unwrap().insert(id);
+        Ok(reference)
+    }
+
+    async fn presign_read(&self, _id: Uuid, _ttl: Duration) -> Result<String> {
+        unimplemented!("the dispatcher never mints a read url")
+    }
+
+    async fn add_ref(&self, _id: Uuid, _run: RunId, _step_hash: &str) -> Result<()> {
+        unimplemented!("references are recorded by a trigger, in the commit transaction")
+    }
+
+    async fn collect(&self, _before: DateTime<Utc>) -> Result<u64> {
+        unimplemented!("the dispatcher never collects")
     }
 }
 

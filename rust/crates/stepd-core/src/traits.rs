@@ -465,6 +465,13 @@ pub trait BlobStore: Send + Sync + 'static {
     ///
     /// Verification is what stops a compromised upload URL substituting different
     /// content for a committed reference, so it is not skippable.
+    ///
+    /// Idempotent: committing a blob that is already committed MUST return its
+    /// reference without failing and without reading the object again. Two
+    /// callers reach this — a relay endpoint that commits as soon as it has the
+    /// bytes, and the dispatcher, which commits every reference in an envelope
+    /// before recording it (§8.3.2) — and on a relay deployment the second
+    /// always follows the first, for every replay of the step.
     async fn commit_blob(&self, id: Uuid) -> Result<stepd_proto::BlobRef>;
 
     /// A read-scoped, short-lived URL. Minted per attempt; never persisted.

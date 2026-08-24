@@ -682,6 +682,166 @@ async fn the_signature_ignores_a_message_that_embeds_an_identifier() {
     assert_eq!(a.signature(), b.signature());
 }
 
+// -------------------------------------------------------- managed blobs (§8.3)
+
+/// A step result carrying one `$blob`, so a test can drive the verification path.
+fn blob_bearing_result(
+    blob: uuid::Uuid,
+) -> impl Fn(&Attempt) -> std::result::Result<AttemptResponse, String> + Send + Sync + 'static {
+    move |_a: &Attempt| {
+        Ok(AttemptResponse::single(Op::Step {
+            id: "capture".into(),
+            hash: "aaaaaaaaaaaaaaaa".into(),
+            // Nested in an array inside an object: the ordinary payload shape,
+            // and the one a top-level-only walk would miss.
+            data: Some(serde_json::json!({
+                "receipts": [ { "file": { "$blob": { "id": blob, "size": 1, "sha256": "ab" } } } ]
+            })),
+            meta: None,
+            error: None,
+        }))
+    }
+}
+
+/// Protocol §8.3.2: "a mismatch fails the commit with `blob_digest_mismatch` and
+/// the ops are discarded."
+///
+/// The defect this guards is the one a presigning backend exposes: nothing else
+/// in the tree commits a blob when the bytes went straight from the app to the
+/// object store, so without this the reference would be recorded unverified —
+/// and `docs/adr/010-payload-tiering.md` rejected checking on first read because
+/// by then the run has already proceeded on a value nobody checked.
+#[tokio::test]
+async fn a_blob_reference_that_fails_verification_fails_the_run_and_records_no_ops() {
+    let blob = uuid::Uuid::now_v7();
+    let store = MemStore::new();
+    let transport = MemTransport::new(blob_bearing_result(blob));
+    let blobs = MemBlobs::mismatching(blob);
+    let d = dispatcher(store.clone(), transport, DispatchConfig::default())
+        .with_blob_store(blobs.clone());
+    let run = store
+        .create_run(NewRun::root("prod", "f"))
+        .await
+        .unwrap()
+        .unwrap();
+
+    d.tick().await.unwrap();
+
+    let r = store.get(run).unwrap();
+    assert!(
+        r.steps.is_empty(),
+        "the ops must be discarded, not recorded: {:?}",
+        r.steps
+    );
+    assert_eq!(
+        r.status,
+        RunStatus::Failed,
+        "the failure is non-retryable, so the run is terminal rather than queued for another go"
+    );
+    assert_eq!(
+        r.error.as_ref().and_then(|e| e.code.as_deref()),
+        Some("blob_digest_mismatch"),
+        "§8.3.2 names the code"
+    );
+    assert_eq!(d.stats().await.rejected, 1);
+    assert_eq!(d.stats().await.committed, 0);
+    assert!(
+        !blobs.is_committed(blob),
+        "a blob that failed verification must not become readable"
+    );
+}
+
+/// The two shapes that must behave exactly as they did before this path existed:
+/// an envelope with no `$blob` in it, and a deployment with no managed blobs at
+/// all. `None` has to be a clean skip, not a warning and not a cost.
+#[tokio::test]
+async fn a_run_with_no_blob_references_commits_the_same_with_or_without_a_blob_store() {
+    for configured in [false, true] {
+        let store = MemStore::new();
+        let transport = MemTransport::new(|_a: &Attempt| {
+            Ok(AttemptResponse::single(Op::Done {
+                data: Some(serde_json::json!({ "ok": true })),
+            }))
+        });
+        let blobs = MemBlobs::new();
+        let d = dispatcher(store.clone(), transport, DispatchConfig::default());
+        let d = if configured {
+            d.with_blob_store(blobs.clone())
+        } else {
+            d
+        };
+        let run = store
+            .create_run(NewRun::root("prod", "f"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        d.tick().await.unwrap();
+
+        assert_eq!(
+            store.get(run).unwrap().status,
+            RunStatus::Completed,
+            "blob store configured: {configured}"
+        );
+        assert_eq!(d.stats().await.committed, 1);
+        assert_eq!(store.commits.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            blobs.verifications.load(Ordering::Relaxed),
+            0,
+            "an envelope with no `$blob` gives the blob store nothing to do"
+        );
+    }
+}
+
+/// The relay path's regression guard, at the dispatcher.
+///
+/// On a backend that cannot presign, the transfer endpoint verifies and commits
+/// the blob while it still holds the bytes — before the ops carrying the
+/// reference are ever returned. So every reference the dispatcher sees there is
+/// already committed, and committing it again has to be a no-op rather than an
+/// error or a second read of the object.
+///
+/// The no-op itself lives in `commit_blob`, which is where the state that
+/// decides it lives; this asserts the dispatcher goes through that call
+/// unconditionally rather than keeping its own idea of what is committed.
+#[tokio::test]
+async fn an_already_committed_blob_reference_commits_normally() {
+    let blob = uuid::Uuid::now_v7();
+    let store = MemStore::new();
+    let transport = MemTransport::new(blob_bearing_result(blob));
+    let blobs = MemBlobs::already_committed(blob);
+    let d = dispatcher(store.clone(), transport, DispatchConfig::default())
+        .with_blob_store(blobs.clone());
+    let run = store
+        .create_run(NewRun::root("prod", "f"))
+        .await
+        .unwrap()
+        .unwrap();
+
+    d.tick().await.unwrap();
+
+    assert!(
+        store
+            .get(run)
+            .unwrap()
+            .steps
+            .contains_key("aaaaaaaaaaaaaaaa"),
+        "the step must be recorded exactly as it would be with no blob in it"
+    );
+    assert_eq!(d.stats().await.committed, 1);
+    assert_eq!(d.stats().await.rejected, 0);
+    assert_eq!(
+        blobs.skipped.load(Ordering::Relaxed),
+        1,
+        "the dispatcher must still call commit_blob; the store decides it is a no-op"
+    );
+    assert_eq!(
+        blobs.verifications.load(Ordering::Relaxed),
+        0,
+        "an already-committed blob must not be verified again"
+    );
+}
+
 // ---------------------------------------------------------------- cron wiring
 
 /// A housekeeper with fakes for everything but the cron store under test.
