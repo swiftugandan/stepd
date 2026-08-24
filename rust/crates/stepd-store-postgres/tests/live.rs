@@ -723,17 +723,22 @@ async fn the_journal_pages_without_dropping_or_repeating_steps() {
 }
 
 /// A `BlobBackend` whose `delete` succeeds for exactly one chosen id and
-/// fails for everything else, so a test can provoke
+/// fails for everything else, recording every id it was ever asked to
+/// delete along the way. Lets a test provoke
 /// `PostgresBlobStore::collect`'s error path without depending on a real
 /// filesystem permission failure — and, because `collect` sweeps the whole
 /// database with no namespace filter, without the assertion being at the
 /// mercy of whatever other blobs a long-lived shared test database happens
-/// to be holding. Only the row this test seeds and asks to succeed can ever
-/// be collected; every other id, however many exist, reports failure and is
-/// left untouched. Nothing but `delete` is exercised by that path, so the
+/// to be holding. Only the row a test asks to succeed can ever be
+/// collected; every other id, however many exist, reports failure and is
+/// left untouched. Nothing but `delete` is exercised by `collect`, so the
 /// rest are `unimplemented!` rather than faked.
+///
+/// `attempted` lives on the stub's own state, not a `static`: two tests
+/// running this struct concurrently must not see each other's calls.
 struct FlakyBackend {
     succeeds: Uuid,
+    attempted: std::sync::Mutex<Vec<Uuid>>,
 }
 
 #[async_trait::async_trait]
@@ -756,6 +761,7 @@ impl BlobBackend for FlakyBackend {
     }
 
     async fn delete(&self, id: Uuid) -> stepd_core::Result<()> {
+        self.attempted.lock().unwrap().push(id);
         if id == self.succeeds {
             Ok(())
         } else {
@@ -771,20 +777,38 @@ impl BlobBackend for FlakyBackend {
 /// `collect` used to either lose orphaned bytes silently (swallow every
 /// delete error and remove the row anyway) or, in an earlier draft of this
 /// refactor, let one bad object block the whole sweep forever. Neither is
-/// right: a delete failure must be logged, the row must survive so
-/// `stepd doctor` can still report the orphaned bytes, and collection must
-/// carry on to the objects that do delete cleanly, returning a count that
-/// reflects what actually got collected.
+/// right: a delete failure must be logged and its row must survive so the
+/// bytes are not forgotten entirely, and collection must carry on to the
+/// objects that do delete cleanly, returning a count that reflects what
+/// actually got collected.
+///
+/// `collect`'s query (`blobs/mod.rs`) has no `ORDER BY`, so this seeds *two*
+/// failing rows rather than one. With only one failure, an implementation
+/// that wrongly `break`s out of the loop on the first error is
+/// indistinguishable from the correct one whenever Postgres happens to scan
+/// the succeeding row first: `break` still reaches and attempts the sole
+/// failing row before stopping, because it is last, so recording "which ids
+/// were attempted" looks identical either way. With two failing rows that
+/// gap closes: whichever of the two is *not* the first failure `break`
+/// encounters is never reached, and it cannot be neither, so at least one
+/// expected id is provably missing from `attempted` under `break`, in every
+/// possible scan order. Recording attempts (not just the final row/count
+/// state) is also load-bearing on its own: a row nobody ever called
+/// `delete` on and a row `delete` was called on and failed both end up
+/// identically present with the count unchanged, so only the attempt log —
+/// not the outcome — can tell "skipped" apart from "tried and failed".
 #[tokio::test]
 async fn a_delete_failure_during_collection_leaves_that_row_and_still_collects_the_rest() {
     let s = db_test!(store);
     let ns = namespace(&s, "blobcollect").await;
 
-    // Both eligible for collection: reserved well before the cutoff, never
-    // committed. Distinct digests: (ns, sha256) is unique.
+    // Two rows whose delete fails, one whose delete succeeds; all eligible
+    // for collection (reserved well before the cutoff, never committed).
+    // Distinct digests: (ns, sha256) is unique.
     let stays = Uuid::now_v7();
+    let also_stays = Uuid::now_v7();
     let goes = Uuid::now_v7();
-    for (id, digest_byte) in [(stays, 0u8), (goes, 1u8)] {
+    for (id, digest_byte) in [(stays, 0u8), (also_stays, 1u8), (goes, 2u8)] {
         sqlx::query(
             "INSERT INTO blobs (id, ns, size, sha256, state, reserved_at)
              VALUES ($1, $2, 1, $3, 'reserved', now() - interval '1 hour')",
@@ -800,9 +824,12 @@ async fn a_delete_failure_during_collection_leaves_that_row_and_still_collects_t
     // `succeeds: goes` means every other id on the whole shared database —
     // including anything left over from unrelated test runs — reports a
     // delete failure and is left alone; only `goes` can possibly be counted.
-    let backend = Arc::new(FlakyBackend { succeeds: goes });
+    let backend = Arc::new(FlakyBackend {
+        succeeds: goes,
+        attempted: std::sync::Mutex::new(Vec::new()),
+    });
     let caps = Capability::new("http://localhost:8080", b"k".to_vec());
-    let blobs = PostgresBlobStore::with_backend(s.pool().clone(), backend, caps);
+    let blobs = PostgresBlobStore::with_backend(s.pool().clone(), backend.clone(), caps);
 
     let collected = blobs
         .collect(Utc::now() - Duration::minutes(1))
@@ -813,15 +840,26 @@ async fn a_delete_failure_during_collection_leaves_that_row_and_still_collects_t
         "only the blob whose bytes actually got deleted counts"
     );
 
+    let attempted = backend.attempted.lock().unwrap().clone();
+    assert!(
+        attempted.contains(&stays) && attempted.contains(&also_stays) && attempted.contains(&goes),
+        "collect must attempt every eligible id, including both after a failure and \
+         after a success, regardless of the order Postgres happened to scan them in: \
+         got {attempted:?}"
+    );
+
     let remaining: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM blobs WHERE ns = $1")
         .bind(&ns)
         .fetch_all(s.pool())
         .await
         .expect("query the survivors");
+    let mut remaining = remaining;
+    remaining.sort();
+    let mut expected = vec![stays, also_stays];
+    expected.sort();
     assert_eq!(
-        remaining,
-        vec![stays],
-        "the row for the failed delete must survive: it is the only remaining \
-         record that bytes are still there for stepd doctor to report"
+        remaining, expected,
+        "the rows for the failed deletes must survive; only the successfully \
+         deleted blob's row may be gone"
     );
 }

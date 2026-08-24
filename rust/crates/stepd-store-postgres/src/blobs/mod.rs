@@ -440,10 +440,19 @@ impl BlobStore for PostgresBlobStore {
             // its name. If the delete fails for a reason other than "already
             // gone" (`BlobBackend::delete` already treats that as success),
             // the row must survive it rather than be removed anyway — it is
-            // now the only remaining record that bytes still sit under `id`,
-            // and `stepd doctor` is what reports them. Removing the row here
-            // would create exactly the orphan the ordering exists to prevent,
-            // just one step later than doing it in the other order would.
+            // now the only remaining record that bytes still sit under `id`.
+            // Removing the row here would create exactly the orphan the
+            // ordering exists to prevent, just one step later than doing it
+            // in the other order would.
+            //
+            // That record is not currently surfaced for both populations
+            // this query sweeps, though: `stepd doctor`'s `orphaned_blobs`
+            // check only counts `state='reserved'` rows past its age
+            // threshold, so a failed delete on a `state='committed'` row (the
+            // second half of the `WHERE` above) leaves a row nothing reports.
+            // Keeping the row is still correct — it is strictly better than
+            // losing the only record entirely — but doctor covering it is a
+            // gap, not a property this code has.
             //
             // One bad object must not block the rest of the sweep either, so
             // this logs and moves on rather than propagating: a store with
@@ -452,8 +461,7 @@ impl BlobStore for PostgresBlobStore {
             if let Err(e) = self.backend.delete(id).await {
                 tracing::warn!(
                     blob = %id, error = %e,
-                    "failed to delete blob bytes during collection; leaving its row \
-                     so stepd doctor can still report it"
+                    "failed to delete blob bytes during collection; leaving its row in place"
                 );
                 continue;
             }
