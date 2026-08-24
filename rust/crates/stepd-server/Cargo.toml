@@ -37,7 +37,9 @@ tokio = { workspace = true, features = ["full"] }
 stepd-sdk.workspace = true
 sha2.workspace = true
 reqwest.workspace = true
-# Only for the S3 end-to-end test's own bucket setup and out-of-band
-# readback — the backend under test never creates a bucket itself, so the
-# test has to, the same way `stepd-blobs-s3/tests/live.rs` does.
+# Only for the S3 end-to-end test's own bucket setup (`ensure_bucket`) — the
+# backend under test never creates a bucket itself, so the test has to, the
+# same way `stepd-blobs-s3/tests/live.rs` does. The test's out-of-band
+# readback goes through `stepd_blobs_s3::S3Backend::read_url` and reqwest
+# instead, not this crate.
 rusty-s3.workspace = true
