@@ -772,6 +772,10 @@ impl BlobBackend for FlakyBackend {
     fn can_presign(&self) -> bool {
         false
     }
+
+    fn name(&self) -> &'static str {
+        "flaky-stub"
+    }
 }
 
 /// `collect` used to either lose orphaned bytes silently (swallow every

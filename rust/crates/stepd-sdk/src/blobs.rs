@@ -256,6 +256,18 @@ impl<'a> PutBuilder<'a> {
                     "the reservation was not deduplicated and carries no upload URL".into(),
                 )
             })?;
+            // Replayed verbatim, every one of them. A presigning backend signs
+            // these headers, so altering or dropping one makes the upload fail
+            // rather than succeed unverified — which is the property that lets
+            // the server verify a digest without ever reading the object.
+            //
+            // `content-length` is among them and the body sets a length too.
+            // That is not a duplicate on the wire: a caller-supplied
+            // `content-length` is what gets framed, and the client adds one only
+            // when none is set. `the_upload_sends_each_reservation_header_exactly_once`
+            // pins that, because a duplicated header is a SigV4 mismatch whose
+            // error names nothing useful, and against the relay — which reads
+            // the body and compares lengths itself — it would go unnoticed.
             let mut req = b.http.put(url).body(self.bytes.to_vec());
             for (k, v) in &reservation.headers {
                 req = req.header(k, v);
@@ -349,6 +361,118 @@ mod tests {
         assert!(
             fresh["$blob"].get("url").is_none(),
             "an SDK-built reference must carry no URL"
+        );
+    }
+
+    /// Read one HTTP request off `stream` and return its head.
+    ///
+    /// Deliberately raw rather than served through a real HTTP framework: the
+    /// question this answers is what bytes leave the client, and a server that
+    /// parses into a header map would answer a slightly different question —
+    /// one where a duplicate has already been folded away or rejected.
+    async fn read_one_request(stream: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+
+        let mut buf = Vec::new();
+        let head_end = loop {
+            let mut chunk = [0u8; 1024];
+            let n = stream.read(&mut chunk).await.expect("a request arrives");
+            assert!(n > 0, "the client closed before sending a whole request");
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break at + 4;
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+
+        // Drain the body, so the client sees its write complete rather than a
+        // reset while it is still sending.
+        let want: usize = head
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+            .and_then(|l| l.split(':').nth(1))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+        let mut have = buf.len() - head_end;
+        while have < want {
+            let mut chunk = [0u8; 1024];
+            let n = stream.read(&mut chunk).await.expect("the body arrives");
+            assert!(n > 0, "the client closed mid-body");
+            have += n;
+        }
+        head
+    }
+
+    /// Run one `PutBuilder::send` against a throwaway server and return the raw
+    /// head of the upload request it produced.
+    async fn record_headers_of_next_put() -> String {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let base = format!("http://{}", listener.local_addr().expect("an address"));
+
+        let upload_url = format!("{base}/upload");
+        let server = tokio::spawn(async move {
+            // The reservation. `connection: close` so the upload arrives on a
+            // fresh connection and this stays a two-accept script.
+            let (mut sock, _) = listener.accept().await.expect("the reservation call");
+            read_one_request(&mut sock).await;
+            // The header set an S3 backend reserves: the length and the digest,
+            // both signed, both to be replayed verbatim.
+            let body = format!(
+                r#"{{"blob_id":"{}","deduplicated":false,"upload_url":"{upload_url}",
+                    "headers":{{"content-length":"5",
+                                "x-amz-checksum-sha256":"LPJNul+wow4m6DsqxbnpnhsWHlwfp0JecwQzYpOLmCQ="}}}}"#,
+                Uuid::nil()
+            );
+            sock.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("the reservation is written");
+            sock.shutdown().await.ok();
+
+            let (mut sock, _) = listener.accept().await.expect("the upload");
+            let head = read_one_request(&mut sock).await;
+            sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await
+                .expect("the upload is acknowledged");
+            sock.shutdown().await.ok();
+            head
+        });
+
+        Blobs::new(&base, "t")
+            .put(Uuid::nil(), b"hello")
+            .send()
+            .await
+            .expect("the upload succeeds against this server");
+
+        server.await.expect("the recording server finishes")
+    }
+
+    #[tokio::test]
+    async fn the_upload_sends_each_reservation_header_exactly_once() {
+        // A duplicated content-length breaks SigV4 and the error names nothing
+        // useful. Assert on the request, not on the upload succeeding — a relay
+        // upload succeeds either way, which is why this went unnoticed.
+        let head = record_headers_of_next_put().await;
+        let counted = |name: &str| {
+            head.lines()
+                .filter(|l| l.to_ascii_lowercase().starts_with(&format!("{name}:")))
+                .count()
+        };
+        assert_eq!(counted("content-length"), 1, "got {head:?}");
+        assert_eq!(counted("x-amz-checksum-sha256"), 1, "got {head:?}");
+        assert!(
+            head.contains("LPJNul+wow4m6DsqxbnpnhsWHlwfp0JecwQzYpOLmCQ="),
+            "a signed header dropped on the floor makes the upload fail rather \
+             than succeed unverified: {head:?}"
         );
     }
 

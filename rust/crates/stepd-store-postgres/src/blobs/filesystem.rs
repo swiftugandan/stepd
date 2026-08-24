@@ -140,6 +140,10 @@ impl BlobBackend for FilesystemBackend {
     fn can_presign(&self) -> bool {
         false
     }
+
+    fn name(&self) -> &'static str {
+        "filesystem"
+    }
 }
 
 #[cfg(test)]

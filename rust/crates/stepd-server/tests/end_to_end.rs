@@ -298,6 +298,10 @@ impl stepd_core::traits::BlobBackend for PresigningBackend {
     fn can_presign(&self) -> bool {
         true
     }
+
+    fn name(&self) -> &'static str {
+        "presigning-stub"
+    }
 }
 
 /// A running server whose managed-blob backend is [`PresigningBackend`].

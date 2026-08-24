@@ -36,6 +36,7 @@ process has no engine in it.
 | `stepd-proto` | The wire contract. **This is the crate a third party implements against** — no I/O, no runtime, so it can be read as a specification. |
 | `stepd-core` | The engine, generic over storage and transport traits. In-memory fakes for every interface, so the logic is testable without a database. |
 | `stepd-store-postgres` | The Postgres store, plus the simulation harness. Pooler-safe: row-level locking only, never session-scoped advisory locks. |
+| `stepd-blobs-s3` | Blob bytes in an S3-compatible object store. Presigns every transfer and verifies digests from object metadata, so no payload byte crosses the server. Nothing constructs it yet — the server still builds the filesystem backend. |
 | `stepd-expr-cel` | A deliberately partial CEL subset, explicit about what it refuses rather than silently accepting. |
 | `stepd-transport-http` | Signed HTTP push, and the egress policy that stops an app-supplied URL reaching cloud metadata. |
 | `stepd-sdk-core` | The replay machinery. No async, which is what makes the dangerous logic exhaustively testable without scheduling noise. |

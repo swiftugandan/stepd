@@ -427,12 +427,14 @@ impl Server {
 
     /// The HTTP router.
     pub fn router(&self) -> Router {
-        let relay = self
+        // `None` when managed blobs are switched off entirely: no backend, so
+        // nothing to relay for and nothing to name.
+        let backend = self
             .state
             .blobs
             .as_ref()
-            .map(|b| !b.can_presign())
-            .unwrap_or(false);
+            .map(|b| (b.backend_name(), !b.can_presign()));
+        let relay = backend.map(|(_, r)| r).unwrap_or(false);
 
         // Once per serving process, naming the backend — not per request,
         // where this warning already fires too (`blobs.rs`'s
@@ -440,20 +442,24 @@ impl Server {
         // the fallback is still in use at three in the morning; a
         // per-request line alone would not tell them their deployment is on
         // the fallback path at all. §8.3.2 calls the relay a compatibility
-        // fallback, and the filesystem backend is the only one shipped here
-        // that needs it. Guarded so a caller building more than one `Router`
-        // from the same `Server` still gets one line, not one per call.
-        if relay
-            && self
+        // fallback. The name comes from the backend rather than a literal
+        // because the guard beside it is already dynamic: an S3-compatible
+        // store that could not presign would be mounted here and logged as
+        // "filesystem", and nothing in the build would catch it. Guarded so a
+        // caller building more than one `Router` from the same `Server` still
+        // gets one line, not one per call.
+        if let Some((name, true)) = backend {
+            if self
                 .blob_relay_warned
                 .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
-        {
-            tracing::warn!(
-                backend = "filesystem",
-                "managed-blob backend cannot presign; mounting the protocol §8.3.2 relay \
-                 route, which puts payload bytes through this process on every transfer"
-            );
+            {
+                tracing::warn!(
+                    backend = name,
+                    "managed-blob backend cannot presign; mounting the protocol §8.3.2 relay \
+                     route, which puts payload bytes through this process on every transfer"
+                );
+            }
         }
 
         Router::new()

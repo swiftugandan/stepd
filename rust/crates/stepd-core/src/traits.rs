@@ -521,6 +521,14 @@ pub trait BlobBackend: Send + Sync + 'static {
     /// answers `true` without truly presigning does not slow anything down — it
     /// hands apps URLs that go nowhere.
     fn can_presign(&self) -> bool;
+
+    /// A short, stable name for logs and diagnostics — `filesystem`, `s3`.
+    ///
+    /// Exists because the relay start-up warning names the backend it is
+    /// mounted for. A hardcoded literal there is right until a second
+    /// non-presigning backend exists, and then it is a log line that confidently
+    /// names the wrong one; nothing in the build would catch that.
+    fn name(&self) -> &'static str;
 }
 
 /// Raw byte transfer through the control plane, for backends that cannot presign.
