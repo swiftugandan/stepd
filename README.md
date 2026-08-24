@@ -121,13 +121,28 @@ overstated the opposite way and that is how four defects sat undetected.
   `runs_record_blob_refs` in `migrations/0011_blob_refs.sql` fires on
   `INSERT OR UPDATE OF input, output ON runs`, so an ingested event's blob does
   get its `blob_refs` row. It is verification, not reference counting, that has
-  one entry point.
+  one entry point. Since `load_attempt` began minting read URLs for
+  `RunContext.input` and the trigger events as well as the journal, an app can
+  also *read* such a blob — `stepd-sdk`'s `fetch` does not check the digest on
+  read either — where before it received a reference with no `url` and could
+  not. That does not widen the verification gap, but it does make it reachable;
+  the remedy is verification at ingest, not withholding a URL from every
+  reference including the ones the dispatcher did verify.
 * **`commit_blob` does no namespace check**, and neither does `attach_read_urls`
   or `presign_read` — all three look a blob up by id alone. Pre-existing, but
   op-commit is the first place an app-supplied blob id drives a
-  `reserved → committed` transition on a row the app may not own. Substituting
-  content is a separate matter and remains impossible: the digest is fixed at
-  reservation and is what the commit checks against.
+  `reserved → committed` transition on a row the app may not own. The reachable
+  consequence is a **read of another namespace's payload**, not just a state
+  change on its row: an app puts `{"$blob": {"id": <foreign uuid>, "size": N}}`
+  in its own step result; `verify_blobs` finds the row already `committed` and
+  short-circuits `Ok`; `record_step_blob_refs` inserts a reference, checking
+  only that the blob exists; and the next attempt mints a read URL for it —
+  which on the S3 backend is a presigned `GET` straight to the object store,
+  since every namespace shares one bucket. Guessing an id is impractical
+  (UUIDv7 leaves 74 random bits), but ids are not secrets: they appear in logs,
+  in the console, and in any app that handled the blob legitimately.
+  Substituting *content* is a separate matter and remains impossible: the
+  digest is fixed at reservation and is what the commit checks against.
 * **The SDK does not enforce the compensation path.** A handler that declares
   `on_cancel` and ignores `ctx.run().cancelling` will re-run its normal work.
   The protocol says the SDK runs only the compensation path; the Rust SDK exposes

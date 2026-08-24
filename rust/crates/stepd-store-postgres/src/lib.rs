@@ -133,6 +133,45 @@ impl PostgresStore {
         self
     }
 
+    /// Mint a fresh read URL into every `$blob` in each of `values`
+    /// (protocol §8.3.1).
+    ///
+    /// One place, called from every path that ships payload JSON to an app, so
+    /// that "which payloads carry a usable URL" is a list in one function
+    /// rather than a property each call site has to remember. Both of the
+    /// defects this consolidates were of exactly that shape: an inline journal
+    /// got URLs while a paged one (§8.6) did not, so whether a reference was
+    /// dereferenceable depended on how many steps the run had recorded; and
+    /// the journal got them while the run input and trigger event beside it
+    /// did not.
+    ///
+    /// A no-op when no backend is configured: managed blobs are optional, and
+    /// a `$blob` cannot be there to sign if nothing could have minted one.
+    ///
+    /// Minting a URL is not a statement that the bytes were verified, and on
+    /// one path they were not. `Dispatcher::verify_blobs` is still the only
+    /// caller of `commit_blob` on the serving path, so a `$blob` that arrived
+    /// in an event ingested through `POST /v1/events` — and so into
+    /// `runs.input` — has had its declared digest checked by nobody, and
+    /// `stepd-sdk`'s `fetch` does not re-check it on read either. That gap is
+    /// the one README records under "a `$blob` that arrives outside an attempt
+    /// envelope is still never verified"; it is not created here, but this is
+    /// what makes it reachable, and the fix belongs at the ingest end rather
+    /// than in withholding a URL from every reference including the verified
+    /// ones.
+    fn mint_read_urls<'a>(&self, values: impl IntoIterator<Item = &'a mut serde_json::Value>) {
+        let Some(backend) = &self.blob_backend else {
+            return;
+        };
+        // Deliberately short and deliberately not stored: a reference replayed
+        // on attempt forty needs a URL minted for attempt forty, and one
+        // persisted from attempt one expired long ago.
+        let ttl = Duration::seconds(BLOB_READ_TTL_SECONDS);
+        for value in values {
+            blobs::attach_read_urls(backend.as_ref(), value, ttl);
+        }
+    }
+
     /// Attach the blob store the housekeeper collects through.
     pub fn with_blob_collector(mut self, store: Arc<blobs::PostgresBlobStore>) -> Self {
         self.blob_collector = Some(store);
@@ -256,6 +295,15 @@ fn recorded_step(r: &sqlx::postgres::PgRow) -> (String, RecordedStep) {
 /// straight past a timer that has not fired.
 const SHIPPABLE: &str = "status IN ('completed','failed','timed_out','cancelled')";
 
+/// How long a `$blob` read URL minted on the way to an app stays valid.
+///
+/// Short on purpose (protocol §8.3.1): the URL is minted per attempt and must
+/// never be persisted by an SDK, so it only has to outlive the attempt that
+/// received it. A `chrono::Duration` cannot be built in a `const`, so this is
+/// the number and `PostgresStore::mint_read_urls` is the one place that wraps
+/// it.
+const BLOB_READ_TTL_SECONDS: i64 = 300;
+
 /// Inline journal ceiling for one attempt, in steps.
 ///
 /// Configurable because the right value depends on payload sizes the engine
@@ -364,21 +412,7 @@ impl StateStore for PostgresStore {
         let mut steps: HashMap<String, RecordedStep> =
             rows.iter().take(cap as usize).map(recorded_step).collect();
 
-        // §8.3.1: mint the read URLs now, on the way out. They are deliberately
-        // short-lived and deliberately not stored — a reference replayed on
-        // attempt forty needs a URL minted for attempt forty, and one persisted
-        // from attempt one expired long ago. Doing it here means every path that
-        // ships a journal gets it, including the paging endpoint.
-        if let Some(backend) = &self.blob_backend {
-            let ttl = Duration::seconds(300);
-            for step in steps.values_mut() {
-                if let Some(data) = step.data.as_mut() {
-                    blobs::attach_read_urls(backend.as_ref(), data, ttl);
-                }
-            }
-        }
-
-        let events = match run.get::<Option<String>, _>("trigger_type") {
+        let mut events = match run.get::<Option<String>, _>("trigger_type") {
             Some(t) => vec![Event {
                 specversion: "1.0".into(),
                 id: None,
@@ -395,6 +429,35 @@ impl StateStore for PostgresStore {
             }],
             None => vec![],
         };
+        let mut input: Option<serde_json::Value> = run.get("input");
+
+        // §8.3.1: mint the read URLs now, on the way out — for the whole
+        // envelope, not only the journal.
+        //
+        // A run input reached by `invoke` or `continue_as_new` carries `$blob`
+        // references the engine itself verified and itself keeps alive:
+        // `op_blob_ids` walks both ops' `input`, so `verify_blobs` commits
+        // them, and `runs_record_blob_refs` in
+        // `migrations/0011_blob_refs.sql` fires on `runs.input` and records a
+        // reference so the collector spares the bytes. Shipping that without a
+        // `url` left the successor or child run holding a reference
+        // `Blobs::fetch` reports as `NoReadUrl` — a message telling the app it
+        // "must come from a step result of the current attempt", about one the
+        // engine supplied.
+        //
+        // The trigger event is walked for the same reason and with a weaker
+        // guarantee behind it: a `$blob` that reached it through
+        // `POST /v1/events` was never verified by anything (README's own gap),
+        // and `runs_record_blob_refs` fires on `runs.input`, not on the event
+        // row. Minting the URL is what makes such a reference usable at all;
+        // see `mint_read_urls` for why that is the right side to be wrong on.
+        self.mint_read_urls(
+            steps
+                .values_mut()
+                .filter_map(|step| step.data.as_mut())
+                .chain(events.iter_mut().map(|e| &mut e.data))
+                .chain(input.as_mut()),
+        );
 
         Ok(Attempt {
             protocol: PROTOCOL_VERSION.into(),
@@ -407,7 +470,7 @@ impl StateStore for PostgresStore {
                 namespace: run.get("ns"),
                 key: run.get("key"),
                 started_at: run.get("started_at"),
-                input: run.get("input"),
+                input,
                 lineage_id: run.get("lineage_id"),
                 chain_position: run.get("chain_position"),
                 cancelling,
@@ -555,6 +618,13 @@ impl StateStore for PostgresStore {
         }))
     }
 
+    /// Protocol §8.6.
+    ///
+    /// Mints read URLs like `load_attempt` does, and for the same reason: this
+    /// is where the rest of a journal too large to ship inline comes from, so
+    /// a `$blob` in a step past `attempt_state_limit` reaches the app through
+    /// here and nowhere else. Without it, whether a reference is usable would
+    /// depend on how many steps the run happened to have recorded.
     async fn steps_page(&self, run_id: RunId, after: Option<&str>, limit: i64) -> Result<StepPage> {
         // Ordered by hash, and the cursor is a hash: an unordered page boundary
         // drops or repeats steps between requests, and either one corrupts a
@@ -577,10 +647,9 @@ impl StateStore for PostgresStore {
         } else {
             None
         };
-        Ok(StepPage {
-            steps: rows.iter().map(recorded_step).collect(),
-            next,
-        })
+        let mut steps: HashMap<String, RecordedStep> = rows.iter().map(recorded_step).collect();
+        self.mint_read_urls(steps.values_mut().filter_map(|step| step.data.as_mut()));
+        Ok(StepPage { steps, next })
     }
 }
 

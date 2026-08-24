@@ -55,6 +55,47 @@ use uuid::Uuid;
 /// [`BlobBackend::upload_target`] or [`BlobBackend::read_url`].
 const INTERNAL_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How long this backend waits to establish a connection to the object store.
+///
+/// See [`REQUEST_TIMEOUT`] for why both of these exist and why they are
+/// constants. Separate from it because the failure they catch is different: a
+/// DROPping firewall or a stale NAT entry stalls the *handshake*, and a
+/// connect timeout is the only thing that bounds it — `reqwest` applies
+/// neither by default.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long this backend waits for a whole metadata request to finish.
+///
+/// Every request this process sends to the object store is metadata: a
+/// `HeadObject` from [`BlobBackend::stored`] and [`S3Backend::check_bucket`],
+/// a `DeleteObject` from [`BlobBackend::delete`]. No payload byte is on either
+/// wire — that is the entire point of presigning — so the budget is a small
+/// round trip's, not a transfer's, and is deliberately far below
+/// `STEPD_ATTEMPT_TIMEOUT_SECONDS` (60 by default), which covers an app
+/// actually doing work.
+///
+/// Without a bound here, one request that never answers stops the engine, not
+/// just the blob: `stored` is reached from `commit_blob` ← `verify_blobs` ←
+/// `Dispatcher::drive` ← `tick_namespace` ← `tick`, and both of those loops
+/// are sequential `for` loops over leases and then over namespaces, driven by
+/// a single task. The circuit breaker in front of them covers the app
+/// transport only, so it never opens for this. `delete` has the same shape
+/// from the housekeeping loop, whose own contract in `stepd_core::traits` is
+/// that timers and lease reclamation keep making progress when no app is
+/// reachable at all. `HttpTransport` bounds its own requests with
+/// `attempt_timeout` for exactly this reason.
+///
+/// Constants rather than `S3Config` fields: the value that is correct here is
+/// a property of the operation, not of the deployment — a `HeadObject` that
+/// has not answered in fifteen seconds is not going to, wherever the bucket
+/// is. Making it an operator knob would add a supported way to reconstruct the
+/// unbounded case by setting it high, and the symptom of that setting is a
+/// stalled engine rather than a slow blob, which is not a trade an operator is
+/// in a position to make from the outside. If a real deployment is ever found
+/// where a metadata round trip legitimately needs longer, raise the constant
+/// here — where the reasoning is — rather than moving the decision out.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// How to reach an S3-compatible object store.
 ///
 /// [`Debug`] is implemented by hand rather than derived, so that the secret key
@@ -109,6 +150,23 @@ pub struct S3Backend {
 impl S3Backend {
     /// Build a backend for `config`. Signs locally; contacts nothing here.
     pub fn new(config: S3Config) -> Result<Self> {
+        Self::with_timeouts(config, CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+    }
+
+    /// [`S3Backend::new`] with the timeouts supplied rather than taken from
+    /// [`CONNECT_TIMEOUT`] and [`REQUEST_TIMEOUT`].
+    ///
+    /// Private, and the seam exists so the timeouts can be *proved* rather
+    /// than read: a test can point a backend at a socket that accepts and
+    /// never answers and assert that the call returns, without the test
+    /// taking the production budget to do it. The alternative — asserting on
+    /// the constants — would pass just as well against a client that was
+    /// never told about them.
+    fn with_timeouts(
+        config: S3Config,
+        connect: std::time::Duration,
+        request: std::time::Duration,
+    ) -> Result<Self> {
         let style = if config.path_style {
             UrlStyle::Path
         } else {
@@ -117,6 +175,8 @@ impl S3Backend {
         let bucket = Bucket::new(config.endpoint, style, config.bucket, config.region)
             .map_err(|e| Error::Config(format!("blob store endpoint is unusable: {e}")))?;
         let http = reqwest::Client::builder()
+            .connect_timeout(connect)
+            .timeout(request)
             .build()
             .map_err(|e| Error::Transport(format!("building the blob store client: {e}")))?;
         Ok(Self {
@@ -255,7 +315,9 @@ impl BlobBackend for S3Backend {
     /// verification costs one small round trip instead of the whole object.
     /// A missing checksum is an error rather than `Ok(None)` for the digest,
     /// because `None` means "read the bytes to find out" and reading the bytes
-    /// is the one thing this backend must not do.
+    /// is the one thing this backend must not do. It is
+    /// [`Error::Unsupported`], which [`Error::is_retryable`] answers `false`
+    /// for: the condition is a property of the server, not a moment in it.
     async fn stored(&self, id: Uuid) -> Result<Option<StoredObject>> {
         let key = Self::key(id);
         let mut action = HeadObject::new(&self.bucket, Some(&self.credentials), &key);
@@ -296,15 +358,27 @@ impl BlobBackend for S3Backend {
                 ))
             })?;
 
+        // `Unsupported`, not `Store`: `Error::is_retryable` is true for
+        // `Store`, and this condition is permanent. An object that was stored
+        // without a checksum does not grow one, so on a server that accepts
+        // the signed `x-amz-checksum-sha256` but does not return it on
+        // `HeadObject` — the class `docs/blob-backends.md` exists to warn
+        // about — retrying means every blob-bearing run re-executing its
+        // steps up to `quarantine_after` times before being quarantined,
+        // while `doctor` goes on reporting the bucket reachable.
         let checksum = res
             .headers()
             .get("x-amz-checksum-sha256")
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| {
-                Error::Store(format!(
+                Error::Unsupported(format!(
                     "the object store reports no x-amz-checksum-sha256 for blob {id}; \
                      this backend verifies digests from object metadata and will not \
-                     download the object to hash it"
+                     download the object to hash it. A server that accepts the signed \
+                     checksum but does not report it back cannot be used as a presigning \
+                     backend — see docs/blob-backends.md for the servers this has been \
+                     verified against, and use STEPD_BLOB_BACKEND=fs to relay bytes \
+                     through the server instead"
                 ))
             })?;
 
@@ -357,17 +431,31 @@ pub enum BucketCheck {
     /// The probe `HeadObject` came back 2xx or 404: the endpoint answered and
     /// these credentials may read there. A 404 is included deliberately — the
     /// probed key is chosen to never exist, so 404 is the expected success
-    /// case, not a failure. See [`S3Backend::check_bucket`] for what this
-    /// cannot tell you.
+    /// case, not a failure.
+    ///
+    /// Says nothing about writing. The probe is a read, so credentials
+    /// granting `GetObject`/`HeadObject`/`DeleteObject` and not `PutObject`
+    /// reach this variant and then fail every upload. See
+    /// [`S3Backend::check_bucket`] for the rest of what this cannot tell you.
     Reachable,
     /// The probe returned 403.
     ///
-    /// Inconclusive, not damning: real AWS S3 answers `HeadObject` on a
-    /// non-existent key with 403 rather than 404 unless the caller also holds
-    /// bucket-level `s3:ListBucket` — a permission this backend never
-    /// otherwise needs and a least-privileged policy would correctly omit. So
-    /// this same 403 is produced by wrong credentials *and* by exactly-right,
-    /// correctly-scoped ones. See [`S3Backend::check_bucket`].
+    /// Inconclusive, not damning; at least three things produce it.
+    ///
+    /// Real AWS S3 answers `HeadObject` on a non-existent key with 403 rather
+    /// than 404 unless the caller also holds bucket-level `s3:ListBucket` — a
+    /// permission this backend never otherwise needs and a least-privileged
+    /// policy would correctly omit. So this same 403 is produced by wrong
+    /// credentials *and* by exactly-right, correctly-scoped ones.
+    ///
+    /// A clock is the third. SigV4 rejects a request whose `X-Amz-Date` is
+    /// more than about fifteen minutes from the store's own clock, and an
+    /// expired presign is rejected the same way — both with a 403 that names
+    /// the signature, not the clock. `stepd doctor`'s `clock_skew` check will
+    /// not catch it: that one compares this host against Postgres, and the
+    /// object store is a third clock nothing here compares against.
+    ///
+    /// See [`S3Backend::check_bucket`].
     Forbidden,
     /// No usable answer — wrong endpoint, network failure, or a status other
     /// than success, 404 or 403.
@@ -398,19 +486,33 @@ impl S3Backend {
     /// documented behaviour, not just inferred from the permission model),
     /// `HeadObject` on a key that does not exist itself answers 403 rather
     /// than 404 *unless the caller also holds `s3:ListBucket`* — the same
-    /// permission this whole probe exists to avoid requiring. So
-    /// [`BucketCheck::Forbidden`] from this probe does not mean "these
-    /// credentials are wrong"; it means "wrong credentials, or right
-    /// credentials correctly scoped to exactly what this backend uses." A
-    /// caller must treat it as inconclusive, not as a confirmed failure — see
-    /// the variant's own doc comment.
+    /// permission this whole probe exists to avoid requiring. A clock far
+    /// enough out from the object store's produces the same 403 through
+    /// SigV4's own freshness window. So [`BucketCheck::Forbidden`] from this
+    /// probe does not mean "these credentials are wrong"; it means "wrong
+    /// credentials, or right credentials correctly scoped to exactly what
+    /// this backend uses, or a skewed clock." A caller must treat it as
+    /// inconclusive, not as a confirmed failure — see the variant's own doc
+    /// comment.
     ///
-    /// The remaining cost, even setting the 403 ambiguity aside: this cannot
-    /// tell an absent bucket apart from a bucket that exists but holds
-    /// nothing at the probed key, since MinIO- and RustFS-style stores answer
-    /// both with 404. It answers "can these credentials read from where the
-    /// config says the bucket is", not "does the bucket exist"; callers
-    /// should say so rather than imply the stronger claim.
+    /// Two further costs, even setting the 403 ambiguity aside.
+    ///
+    /// This is a read, so it says nothing about writing. A bucket policy
+    /// granting `GetObject`, `HeadObject` and `DeleteObject` but not
+    /// `PutObject` — the likeliest way to get a least-privileged policy
+    /// *nearly* right — answers this probe 404 and passes as
+    /// [`BucketCheck::Reachable`], and then every app's first upload fails at
+    /// the object store with a 403 nothing here predicted. The probe stays
+    /// read-only anyway: a write probe would have to leave an object behind
+    /// or delete one, and a health check that writes to the bucket it is
+    /// checking is a worse trade than a health check with a stated blind
+    /// spot. Callers must state it rather than report an unqualified pass.
+    ///
+    /// And it cannot tell an absent bucket apart from a bucket that exists
+    /// but holds nothing at the probed key, since MinIO- and RustFS-style
+    /// stores answer both with 404. It answers "can these credentials read
+    /// from where the config says the bucket is", not "does the bucket
+    /// exist"; callers should say so rather than imply the stronger claim.
     ///
     /// For `stepd doctor`: an unreachable endpoint today surfaces only when
     /// an app's first upload fails, a system away from whoever configured it.
@@ -583,6 +685,68 @@ mod tests {
             b.check_bucket().await,
             BucketCheck::Unreachable(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_store_that_accepts_a_connection_and_never_answers_does_not_block_forever() {
+        // The failure this bounds is not a slow blob, it is a stopped engine:
+        // `stored` is reached from `commit_blob` ← `verify_blobs` ←
+        // `Dispatcher::drive`, and the two loops above that are sequential
+        // `for` loops over leases and then over namespaces on one task. A
+        // `HeadObject` that never returns therefore holds up dispatch for
+        // every namespace, and the circuit breaker in front of it watches the
+        // app transport, not this one.
+        //
+        // Deliberately a socket that *accepts* and then says nothing, not a
+        // closed port: a closed port already fails fast without any timeout,
+        // so a test against one passes with the timeouts removed.
+        // `a_bucket_check_against_nothing_listening_is_unreachable_not_a_panic`
+        // above is that other case, and it is a different property.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let addr = listener.local_addr().expect("a bound address");
+        let _sink = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((conn, _)) = listener.accept().await {
+                // Held, never read from and never written to. Dropping the
+                // socket here would send a FIN and let the client fail
+                // promptly, which is the case this test is not about.
+                held.push(conn);
+            }
+        });
+
+        // Short budgets so the assertion is about behaviour rather than about
+        // waiting out the production ones; `new` is what applies those.
+        let backend = S3Backend::with_timeouts(
+            S3Config {
+                endpoint: format!("http://{addr}").parse().expect("a url"),
+                region: "us-east-1".into(),
+                bucket: "stepd".into(),
+                access_key: "probe".into(),
+                secret_key: "probeprobe".into(),
+                path_style: true,
+            },
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_millis(200),
+        )
+        .expect("a backend builds from static configuration");
+
+        // The outer bound is the assertion, not a safety net: without a
+        // timeout on the client the inner call never returns, and a test that
+        // simply awaited it would hang the suite instead of going red.
+        // Generous by two orders of magnitude against the 200ms budget, so a
+        // loaded CI runner cannot fail it either way.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            backend.stored(Uuid::nil()),
+        )
+        .await
+        .expect("the backend must give up on its own rather than wait forever");
+        assert!(
+            result.is_err(),
+            "a request that never gets an answer must end as an error"
+        );
     }
 
     #[test]

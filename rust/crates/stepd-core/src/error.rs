@@ -42,6 +42,20 @@ pub enum Error {
     /// can break by rewording a log line, with nothing to fail when it does.
     #[error("not found: {0}")]
     NotFound(String),
+
+    /// A backing service answered, and what it answered rules the operation
+    /// out for good.
+    ///
+    /// Distinct from `Store`, which covers "the store could not answer" and is
+    /// therefore retryable. This variant is for the store answering perfectly
+    /// well with something the engine cannot work with, where nothing about
+    /// waiting and asking again changes the reply: an object stored without
+    /// the checksum an S3 backend verifies digests from will not grow one.
+    /// Classified as `Store` — which is what it was — such a condition is
+    /// retried up to `quarantine_after` times, and each of those retries is a
+    /// re-execution of a side effect the engine knows nothing about.
+    #[error("unsupported: {0}")]
+    Unsupported(String),
 }
 
 impl Error {
@@ -50,7 +64,9 @@ impl Error {
     /// Protocol and config errors are the app's or operator's fault and will
     /// fail identically forever, so retrying them only burns dispatch capacity.
     /// A `NotFound` is the same shape: the row does not exist, and retrying
-    /// the identical read does not change that.
+    /// the identical read does not change that. So is `Unsupported`: the
+    /// service answered, and its answer is a standing property of that
+    /// service, not a moment in it.
     pub fn is_retryable(&self) -> bool {
         matches!(self, Error::Store(_) | Error::Transport(_))
     }

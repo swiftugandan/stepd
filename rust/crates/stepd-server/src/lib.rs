@@ -130,25 +130,50 @@ pub enum BlobBackendConfig {
     S3(S3ConfigInput),
 }
 
+/// What `STEPD_BLOB_S3_ENDPOINT` was, in the three states it can be in.
+///
+/// Three variants rather than an `Option<Url>`, because `None` was answering
+/// two different questions with one word. An operator who set the variable to
+/// something that is not a URL — `127.0.0.1:9000`, say, where a leading digit
+/// makes the whole thing an invalid scheme — had the value silently dropped by
+/// `.parse().ok()` and was then told by [`S3ConfigInput::resolve`] that
+/// `STEPD_BLOB_S3_ENDPOINT` was *unset*, which sends them to look at the wrong
+/// thing entirely: it is set, right there in front of them. [`Self::Unparsed`]
+/// keeps the value so the diagnostic can quote it back.
+///
+/// Not a pair of fields (`Option<Url>` beside `Option<String>`): that has four
+/// states for three meanings, and the fourth — both populated — has no answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EndpointInput {
+    /// `STEPD_BLOB_S3_ENDPOINT` was not set.
+    ///
+    /// An earlier version
+    /// expressed this as the sentinel URL `"http://unset.invalid"` and
+    /// compared `Url::as_str()` against it — WHATWG URL normalisation gives a
+    /// special-scheme URL an empty path of `/`, so the parsed sentinel read
+    /// back as `"http://unset.invalid/"` and the comparison never matched.
+    /// `STEPD_BLOB_BACKEND=s3` with no endpoint set built and served
+    /// regardless, presigning uploads against a hostname RFC 2606 guarantees
+    /// will never resolve — exactly the failure the completeness check exists
+    /// to prevent. A variant makes "not configured" a state the type carries,
+    /// not a string that has to survive being re-parsed and compared.
+    Unset,
+    /// It was set, and is not a URL. Carried verbatim so the error can quote
+    /// it rather than report the variable as unset.
+    Unparsed(String),
+    /// It was set and parsed.
+    Url(Url),
+}
+
 /// S3 configuration as read from the environment, before completeness
 /// validation.
-///
-/// `endpoint` is `Option<Url>`, not a sentinel URL string. An earlier version
-/// used `"http://unset.invalid"` and compared `Url::as_str()` against it —
-/// WHATWG URL normalisation gives a special-scheme URL an empty path of `/`,
-/// so the parsed sentinel read back as `"http://unset.invalid/"` and the
-/// comparison never matched. `STEPD_BLOB_BACKEND=s3` with no endpoint set
-/// built and served regardless, presigning uploads against a hostname RFC
-/// 2606 guarantees will never resolve — exactly the failure the completeness
-/// check exists to prevent. `Option` makes "not configured" a state the type
-/// carries, not a string that has to survive being re-parsed and compared.
 ///
 /// [`Debug`] is implemented by hand, like [`S3Config`]'s, so the secret key
 /// does not reach a log the first time someone prints a `Config`.
 #[derive(Clone)]
 pub struct S3ConfigInput {
-    /// Base URL of the service, if `STEPD_BLOB_S3_ENDPOINT` was set and parsed.
-    pub endpoint: Option<Url>,
+    /// Base URL of the service, as `STEPD_BLOB_S3_ENDPOINT` left it.
+    pub endpoint: EndpointInput,
     /// Region name used in the signature.
     pub region: String,
     /// Bucket holding the objects.
@@ -175,7 +200,10 @@ impl std::fmt::Debug for S3ConfigInput {
 
 impl S3ConfigInput {
     /// Resolve into a usable [`S3Config`], or name every `STEPD_BLOB_S3_*`
-    /// variable that is still missing.
+    /// variable that is unset or unusable — and say which of the two it is,
+    /// quoting the value back when it was set to something that will not
+    /// parse. Reporting a variable an operator is looking straight at as
+    /// "unset" sends them to fix the wrong thing.
     ///
     /// Called twice on the way to a running server: once by
     /// [`Config::validate_blob_backend`], so an incomplete config fails
@@ -187,30 +215,41 @@ impl S3ConfigInput {
     /// binary, in `stepd-cli`) can resolve the same value it is diagnosing
     /// rather than reimplementing this check.
     pub fn resolve(&self) -> anyhow::Result<S3Config> {
-        let mut missing = Vec::new();
-        if self.endpoint.is_none() {
-            missing.push("STEPD_BLOB_S3_ENDPOINT");
-        }
+        // Phrased per problem rather than as a list of names, so that "set to
+        // something unusable" does not have to be reported with the same word
+        // as "never set".
+        let mut problems: Vec<String> = Vec::new();
+        let endpoint = match &self.endpoint {
+            EndpointInput::Url(u) => Some(u.clone()),
+            EndpointInput::Unset => {
+                problems.push("STEPD_BLOB_S3_ENDPOINT is unset".into());
+                None
+            }
+            EndpointInput::Unparsed(raw) => {
+                problems.push(format!(
+                    "STEPD_BLOB_S3_ENDPOINT is set to {raw:?}, which is not a URL — it \
+                     needs a scheme and a host, as in http://minio:9000"
+                ));
+                None
+            }
+        };
         if self.bucket.is_empty() {
-            missing.push("STEPD_BLOB_S3_BUCKET");
+            problems.push("STEPD_BLOB_S3_BUCKET is unset".into());
         }
         if self.access_key.is_empty() {
-            missing.push("STEPD_BLOB_S3_ACCESS_KEY");
+            problems.push("STEPD_BLOB_S3_ACCESS_KEY is unset".into());
         }
         if self.secret_key.is_empty() {
-            missing.push("STEPD_BLOB_S3_SECRET_KEY");
+            problems.push("STEPD_BLOB_S3_SECRET_KEY is unset".into());
         }
         anyhow::ensure!(
-            missing.is_empty(),
-            "STEPD_BLOB_BACKEND=s3 but {} unset; a half-configured S3 backend would hand \
+            problems.is_empty(),
+            "STEPD_BLOB_BACKEND=s3 but {}; a half-configured S3 backend would hand \
              apps upload URLs pointing at nothing",
-            missing.join(", ")
+            problems.join("; ")
         );
         Ok(S3Config {
-            endpoint: self
-                .endpoint
-                .clone()
-                .expect("checked not-None immediately above"),
+            endpoint: endpoint.expect("a problem was recorded above for every other case"),
             region: self.region.clone(),
             bucket: self.bucket.clone(),
             access_key: self.access_key.clone(),
@@ -387,6 +426,18 @@ impl Config {
     /// capability signed with a predictable key verifies for anybody who guesses
     /// it, and the failure is silent: every URL checks out, including the ones an
     /// attacker minted.
+    ///
+    /// This gates the whole subsystem, including the S3 backend, which has no
+    /// use for `blob_key` whatsoever: the HMAC capability it mints is only
+    /// ever presented to the server's own §8.3.2 relay routes, and those are
+    /// not mounted for a backend that presigns (`Server::router` passes
+    /// `relay = !can_presign()`). So an S3 deployment is required to set a key
+    /// that nothing on it will ever verify. That coupling is kept rather than
+    /// removed because the alternative is two different meanings of "managed
+    /// blobs are on" — one per backend — with `Server::build`, `doctor`, and
+    /// `Config::validate` each having to pick the right one; it is named here
+    /// so nobody has to rediscover why the requirement looks arbitrary from an
+    /// S3 deployment's side.
     pub fn blobs_enabled(&self) -> bool {
         !self.blob_key.is_empty()
     }
@@ -438,7 +489,17 @@ fn blob_backend_from(lookup: impl Fn(&str) -> Option<String>) -> BlobBackendConf
     let backend = lookup("STEPD_BLOB_BACKEND").map(|v| v.trim().to_ascii_lowercase());
     match backend.as_deref() {
         Some("s3") => BlobBackendConfig::S3(S3ConfigInput {
-            endpoint: lookup("STEPD_BLOB_S3_ENDPOINT").and_then(|v| v.parse().ok()),
+            // Not `.and_then(|v| v.parse().ok())`: that maps a value that
+            // will not parse to the same thing as no value, and `resolve`
+            // then tells an operator staring at the variable that it is
+            // unset. `EndpointInput` keeps the two apart.
+            endpoint: match lookup("STEPD_BLOB_S3_ENDPOINT") {
+                None => EndpointInput::Unset,
+                Some(raw) => match raw.parse::<Url>() {
+                    Ok(url) => EndpointInput::Url(url),
+                    Err(_) => EndpointInput::Unparsed(raw),
+                },
+            },
             // Most self-hosted S3-compatible servers ignore the region but
             // still require it to match what was signed; `us-east-1` is the
             // one every one of them accepts.
@@ -549,7 +610,18 @@ impl Server {
         // Checked before anything touches the network: a half-configured S3
         // backend is not something a database connection or a migration can
         // fix, and failing here names the missing variable instead of a run.
-        config.validate_blob_backend()?;
+        //
+        // Only when managed blobs are actually on, though. With no
+        // `STEPD_BLOB_SIGNING_KEY` the `else` branch below builds no blob
+        // store at all, `:reserve` answers 501 and no backend is ever
+        // constructed — so refusing to start over a bucket this process will
+        // never address would stop a server whose blob configuration cannot
+        // hurt anyone. The same `blobs_enabled()` gate decides both, in the
+        // same order, which is what keeps the refusal and the construction
+        // from disagreeing about whether the backend matters.
+        if config.blobs_enabled() {
+            config.validate_blob_backend()?;
+        }
 
         let mut store =
             PostgresStore::connect(&config.database_url, config.max_connections).await?;
@@ -822,7 +894,7 @@ mod tests {
 
     fn probe_s3_config() -> S3ConfigInput {
         S3ConfigInput {
-            endpoint: Some("http://127.0.0.1:9000".parse().unwrap()),
+            endpoint: EndpointInput::Url("http://127.0.0.1:9000".parse().unwrap()),
             region: "us-east-1".into(),
             bucket: "stepd".into(),
             access_key: "probe".into(),
@@ -864,12 +936,12 @@ mod tests {
         // (`http://unset.invalid` parsed back as `http://unset.invalid/`), so
         // this branch was previously dead — `STEPD_BLOB_S3_ENDPOINT` unset
         // built and served regardless, presigning against a hostname RFC 2606
-        // guarantees will never resolve. `endpoint: Option<Url>` removes the
+        // guarantees will never resolve. `EndpointInput` removes the
         // sentinel-comparison class of bug rather than fixing the comparison.
         let c = Config {
             blob_key: vec![1, 2, 3],
             blob_backend: BlobBackendConfig::S3(S3ConfigInput {
-                endpoint: None,
+                endpoint: EndpointInput::Unset,
                 ..probe_s3_config()
             }),
             ..Default::default()
@@ -972,6 +1044,79 @@ mod tests {
             ),
             other => panic!("expected an S3 backend, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_endpoint_that_is_set_but_unusable_is_not_reported_as_unset() {
+        // `.and_then(|v| v.parse().ok())` mapped both to the same `None`, so
+        // an operator was told the variable was unset while looking straight
+        // at it. A leading digit makes `127.0.0.1:9000` an invalid scheme and
+        // `Url` refuses the whole string — the value below is checked against
+        // the parser here rather than assumed, because most scheme-less
+        // spellings (`minio:9000`) *do* parse, as an opaque-path URL with
+        // scheme `minio`, and would reach `Bucket::new` instead.
+        assert!(
+            "127.0.0.1:9000".parse::<Url>().is_err(),
+            "this test needs a value the URL parser actually refuses"
+        );
+        let cfg = match blob_backend_from(lookup(&[
+            ("STEPD_BLOB_BACKEND", "s3"),
+            ("STEPD_BLOB_S3_ENDPOINT", "127.0.0.1:9000"),
+            ("STEPD_BLOB_S3_BUCKET", "stepd"),
+            ("STEPD_BLOB_S3_ACCESS_KEY", "probe"),
+            ("STEPD_BLOB_S3_SECRET_KEY", "probeprobe"),
+        ])) {
+            BlobBackendConfig::S3(s3) => s3,
+            other => panic!("expected an S3 backend, got {other:?}"),
+        };
+        assert_eq!(
+            cfg.endpoint,
+            EndpointInput::Unparsed("127.0.0.1:9000".into()),
+            "the value has to survive parsing to be quoted back"
+        );
+        let err = cfg
+            .resolve()
+            .expect_err("an unusable endpoint must not resolve");
+        let text = err.to_string();
+        assert!(text.contains("127.0.0.1:9000"), "got {text}");
+        assert!(
+            !text.contains("STEPD_BLOB_S3_ENDPOINT is unset"),
+            "a variable that is set must not be reported as unset: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn blobs_switched_off_do_not_make_a_leftover_s3_config_fatal() {
+        // The mirror of
+        // `selecting_s3_without_a_bucket_is_refused_rather_than_defaulted`:
+        // with no `blob_key`, `Server::build` takes the `else` branch and
+        // constructs no blob store and no backend at all, so refusing to start
+        // over a bucket this process will never address stops a server whose
+        // blob configuration cannot hurt anything.
+        //
+        // Asserted by getting *past* the blob check to the database, on a port
+        // nothing listens on, rather than by calling `validate_blob_backend`
+        // directly — that would pass just as well with the gate removed, since
+        // the check itself is unchanged. The bucket is deliberately empty, so
+        // before the gate this failed naming `STEPD_BLOB_S3_BUCKET`.
+        let c = Config {
+            database_url: "postgres://postgres@127.0.0.1:1/stepd_no_such_server".into(),
+            blob_key: Vec::new(),
+            blob_backend: BlobBackendConfig::S3(S3ConfigInput {
+                bucket: String::new(),
+                ..probe_s3_config()
+            }),
+            ..Default::default()
+        };
+        assert!(!c.blobs_enabled(), "no signing key means no managed blobs");
+        let err = Server::build(c)
+            .await
+            .err()
+            .expect("there is no database on port 1");
+        assert!(
+            !err.to_string().contains("STEPD_BLOB_S3_"),
+            "the blob backend must not be validated when it will never be built: {err}"
+        );
     }
 
     #[test]

@@ -320,6 +320,21 @@ async fn an_object_the_store_reports_no_checksum_for_is_an_error_not_a_fallback(
         message.contains("will not"),
         "and must say the backend refuses rather than that it failed: {message}"
     );
+    assert!(
+        message.contains("docs/blob-backends.md"),
+        "and must point at the compatibility note, which is where the remedy is: {message}"
+    );
+    // The classification, not just the message. Reported as `Error::Store` this
+    // was retryable, and a server that accepts the signed checksum but does not
+    // report it back on HeadObject — the class `docs/blob-backends.md` exists to
+    // warn about — would therefore fail no configuration check and instead make
+    // every blob-bearing run re-execute its steps up to `quarantine_after` times
+    // before quarantining. The condition is permanent: an object stored without
+    // a checksum does not grow one.
+    assert!(
+        !err.is_retryable(),
+        "a permanent condition must not be retried: {message}"
+    );
 
     b.delete(id).await.expect("clean up");
 }
