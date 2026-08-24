@@ -55,7 +55,7 @@ use stepd_core::{Error, Result};
 use stepd_proto::*;
 use uuid::Uuid;
 
-mod blobs;
+pub mod blobs;
 mod cron;
 pub use blobs::{attach_read_urls, blob_ids, sha256_hex, Capability, PostgresBlobStore};
 
@@ -76,16 +76,20 @@ pub struct PostgresStore {
     pool: PgPool,
     /// Mints the short-lived read URLs attached to `$blob` values on the way out.
     ///
-    /// Holds no pool and no filesystem root, only the signing key and base URL,
-    /// which is why it can live here without the store gaining a dependency on
-    /// where bytes are stored. `None` on a server with managed blobs disabled.
-    blob_caps: Option<Arc<blobs::Capability>>,
+    /// Holds whatever the backend holds — for the filesystem backend that is a
+    /// signing key and base URL, for a presigning one it may be network
+    /// credentials too — so this field says only that the store defers to
+    /// whichever [`BlobBackend`] the caller configured, not what that backend
+    /// needs. `None` on a server with managed blobs disabled.
+    blob_backend: Option<Arc<dyn BlobBackend>>,
     /// The store used by the housekeeper's collection sweep.
     ///
-    /// Separate from `blob_caps` because they need different things: minting a
-    /// read URL needs only a key, while deleting bytes needs a filesystem root.
-    /// A server that serves blobs has both; one that only reads references
-    /// minted elsewhere would have only the first.
+    /// Separate from `blob_backend` because they need different things:
+    /// minting a read URL needs only the backend, while collection also needs
+    /// the index — the row, the per-namespace dedupe — that only
+    /// [`blobs::PostgresBlobStore`] holds. A server that serves blobs has
+    /// both; one that only reads references minted elsewhere would have only
+    /// the first.
     blob_collector: Option<Arc<blobs::PostgresBlobStore>>,
     /// Round-robin position for the cron sweep's namespace rotation.
     ///
@@ -112,20 +116,20 @@ impl PostgresStore {
     pub fn from_pool(pool: PgPool) -> Self {
         Self {
             pool,
-            blob_caps: None,
+            blob_backend: None,
             blob_collector: None,
             cron_cursor: Arc::new(tokio::sync::Mutex::new(0)),
         }
     }
 
-    /// Attach the capability minter, so `$blob` values shipped to an attempt
-    /// carry a usable read URL (protocol §8.3.1).
+    /// Attach the backend, so `$blob` values shipped to an attempt carry a
+    /// usable read URL (protocol §8.3.1).
     ///
     /// Without it the app receives a reference it cannot dereference. The URL is
     /// minted per attempt and must never be persisted by an SDK, which is why it
     /// is added here on the way out rather than stored with the step.
-    pub fn with_blob_capability(mut self, caps: blobs::Capability) -> Self {
-        self.blob_caps = Some(Arc::new(caps));
+    pub fn with_blob_backend(mut self, backend: Arc<dyn BlobBackend>) -> Self {
+        self.blob_backend = Some(backend);
         self
     }
 
@@ -365,11 +369,11 @@ impl StateStore for PostgresStore {
         // attempt forty needs a URL minted for attempt forty, and one persisted
         // from attempt one expired long ago. Doing it here means every path that
         // ships a journal gets it, including the paging endpoint.
-        if let Some(caps) = &self.blob_caps {
+        if let Some(backend) = &self.blob_backend {
             let ttl = Duration::seconds(300);
             for step in steps.values_mut() {
                 if let Some(data) = step.data.as_mut() {
-                    blobs::attach_read_urls(caps, data, ttl);
+                    blobs::attach_read_urls(backend.as_ref(), data, ttl);
                 }
             }
         }
