@@ -921,12 +921,17 @@ impl BlobBackend for CountingBackend {
 /// relayed the bytes, and — since protocol §8.3.2 makes the op commit the point
 /// at which a `$blob` becomes readable — the dispatcher, for every reference in
 /// an envelope it is about to record. On a backend that cannot presign the
-/// second always follows the first, and it recurs on every replay of the step.
+/// second always follows the first, because the transfer endpoint commits while
+/// it still holds the bytes — before the ops carrying the reference have been
+/// returned at all. It also recurs whenever an app carries a reference into a
+/// later step or its `done` output, and after an attempt that re-executed
+/// having lost the fence, where `reserve` dedupes on the already-committed
+/// digest and hands back the same id.
 ///
 /// So committing an already-committed blob has to return its reference without
 /// going back to the object at all. Re-reading would be a `HeadObject` per
-/// reference per attempt on object storage, and a full re-read plus rehash on
-/// the filesystem backend; erroring would break the relay path outright.
+/// reference on object storage, and a full re-read plus rehash on the
+/// filesystem backend; erroring would break the relay path outright.
 #[tokio::test]
 async fn committing_an_already_committed_blob_does_not_look_at_the_object_again() {
     let s = db_test!(store);

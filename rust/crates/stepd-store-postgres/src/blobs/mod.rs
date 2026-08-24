@@ -391,9 +391,23 @@ impl BlobStore for PostgresBlobStore {
         // Committing an already-committed blob is a no-op, not an error and not
         // a second look at the bytes. Two callers commit now: the relay
         // endpoint, as soon as it has stored the bytes, and the dispatcher, for
-        // every reference in an envelope it is about to record. On a relay
-        // deployment the second always follows the first, and every replay of a
-        // recorded step brings the dispatcher back here for the same id.
+        // every reference in an envelope it is about to record. Three ways the
+        // second call lands on a blob the first already committed:
+        //
+        //  - On a relay deployment, always. The transfer endpoint commits while
+        //    it still holds the bytes, which is before the ops carrying the
+        //    reference have been returned at all.
+        //  - An app that carries a reference forward — the same `$blob` in a
+        //    later step's result, or in the final `done` output — sends the same
+        //    id through a second commit, from a different envelope.
+        //  - An attempt that re-executes after losing the fence. The blobs were
+        //    committed before `store.commit` was refused, so on the next attempt
+        //    `reserve` finds the digest already committed in this namespace,
+        //    dedupes, and hands back the same id.
+        //
+        // Not, note, ordinary replay: a memoised step is never re-emitted as an
+        // op (`stepd-sdk-core` returns the recorded value without reaching
+        // `push_op`), so a recorded step's reference does not come back this way.
         //
         // Skipping the work is safe because `state='committed'` is itself the
         // record that verification passed: the only statement in this crate that
