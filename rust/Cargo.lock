@@ -2330,6 +2330,7 @@ dependencies = [
  "hex",
  "rand 0.8.7",
  "reqwest",
+ "rusty-s3",
  "serde",
  "serde_json",
  "sha2 0.10.9",

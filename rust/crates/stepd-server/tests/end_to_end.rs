@@ -14,12 +14,17 @@
 //! Skipped, loudly, when `STEPD_TEST_DATABASE_URL` is unset.
 
 use std::collections::HashMap;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
+use axum::serve::Listener;
 use stepd_sdk::prelude::*;
 use stepd_server::{BlobBackendConfig, Config, Server};
 use stepd_transport_http::EgressPolicy;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use uuid::Uuid;
 
 /// Executions per (run, step).
@@ -1355,5 +1360,477 @@ async fn a_presigning_backend_does_not_expose_the_relay_route() {
     assert_ne!(
         reserve_status, 404,
         "the reserve route must still exist; only the relay content route is conditional"
+    );
+}
+
+// ------------------------------------------------------ S3: no bytes reach the server
+//
+// BR-19's claim, proven end to end rather than about a backend in isolation:
+// bulk payload data must never traverse the control plane. Everything below
+// exists to drive one real run, whose step result carries a `$blob`, against
+// a real S3-compatible object store, and to say what that run touching this
+// server's own socket would have to look like if the claim ever stopped
+// being true.
+
+/// A `TcpStream` that adds every byte it moves, in either direction, to a
+/// shared counter.
+///
+/// Per-fixture, never a `static`: CLAUDE.md is explicit that per-instance
+/// state landing in a `static` has cost this codebase three prior
+/// recurrences, each found by two tests interfering through shared mutable
+/// state. Two [`S3Fixture`]s built by two tests in this binary must not be
+/// able to move each other's count, so the counter lives on the struct each
+/// test owns and nowhere else.
+struct CountingStream {
+    inner: tokio::net::TcpStream,
+    bytes: Arc<AtomicU64>,
+}
+
+impl AsyncRead for CountingStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.inner).poll_read(cx, buf);
+        if poll.is_ready() {
+            let added = buf.filled().len() - before;
+            this.bytes.fetch_add(added as u64, Ordering::Relaxed);
+        }
+        poll
+    }
+}
+
+impl AsyncWrite for CountingStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.inner).poll_write(cx, buf);
+        if let Poll::Ready(Ok(n)) = &poll {
+            this.bytes.fetch_add(*n as u64, Ordering::Relaxed);
+        }
+        poll
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+/// Wraps a bound listener so every accepted connection is a [`CountingStream`]
+/// sharing one counter: the total bytes, in both directions, that have ever
+/// crossed this server's own client-facing socket.
+///
+/// Only the API listener is ever wrapped in this file, never the app's: the
+/// control plane BR-19 talks about is this server, and that is the boundary
+/// the no-bytes test needs a count of.
+struct CountingListener {
+    inner: tokio::net::TcpListener,
+    bytes: Arc<AtomicU64>,
+}
+
+impl Listener for CountingListener {
+    type Io = CountingStream;
+    type Addr = std::net::SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        // Matches `TcpListener`'s own `Listener` impl: retry on a transient
+        // accept error rather than stopping the server over it.
+        loop {
+            if let Ok((stream, addr)) = self.inner.accept().await {
+                return (
+                    CountingStream {
+                        inner: stream,
+                        bytes: self.bytes.clone(),
+                    },
+                    addr,
+                );
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+/// Bytes the S3 no-relay test uploads and reads back.
+///
+/// Large enough that a full relay through the control plane and a few
+/// kilobytes of JSON are not the same order of magnitude, which is what makes
+/// the byte-count assertion below able to tell them apart. The content itself
+/// is arbitrary.
+const S3_TEST_PAYLOAD: &[u8] = &[0x5A; 256 * 1024];
+
+/// The workflow this test drives: one step that puts bytes through the SDK's
+/// own blob client, exactly as an application would, and returns the
+/// reference as its result.
+///
+/// The base URL and token the step needs to reach this server come off
+/// `ctx.run().input` — the same trick `nightly_report` above uses for its
+/// occurrence — because a bare `fn(&Ctx)` has no other way to receive them.
+async fn s3_blob_upload(ctx: &Ctx) -> StepResult<Blob> {
+    let input = ctx.run().input.clone().unwrap_or_default();
+    let base = input["stepd_base"].as_str().unwrap_or_default().to_string();
+    let token = input["stepd_token"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let run_id = ctx.run().id;
+
+    ctx.step("upload", move || {
+        let base = base.clone();
+        let token = token.clone();
+        async move {
+            Blobs::new(base, token)
+                .put(run_id, S3_TEST_PAYLOAD)
+                .content_type("application/octet-stream")
+                .send()
+                .await
+                .map_err(|e| StepError::fatal(format!("blob upload failed: {e}")))
+        }
+    })
+    .await
+}
+
+/// Configuration for the live S3-compatible object store, or `None` with a
+/// loud reason.
+///
+/// Mirrors `stepd-blobs-s3/tests/live.rs`'s `config()` exactly — same env
+/// vars, same defaults — because both suites have to agree on how to reach
+/// the same test server. Not shared as library code between the crates: that
+/// crate's own docs reject reaching for app-side or store-side code to save a
+/// few lines, and the same reasoning applies here in the other direction.
+fn s3_test_config() -> Option<stepd_blobs_s3::S3Config> {
+    let endpoint = std::env::var("STEPD_TEST_S3_ENDPOINT").ok()?;
+    let var = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.into());
+    Some(stepd_blobs_s3::S3Config {
+        endpoint: endpoint.parse().expect("STEPD_TEST_S3_ENDPOINT is a URL"),
+        region: var("STEPD_TEST_S3_REGION", "us-east-1"),
+        bucket: var("STEPD_TEST_S3_BUCKET", "stepd"),
+        access_key: var("STEPD_TEST_S3_ACCESS_KEY", "probe"),
+        secret_key: var("STEPD_TEST_S3_SECRET_KEY", "probeprobe"),
+        path_style: true,
+    })
+}
+
+/// Create the test bucket, tolerating one that already exists.
+///
+/// `S3Backend` never creates a bucket itself (see its module docs), so
+/// whoever tests it has to. Duplicated from
+/// `stepd-blobs-s3/tests/live.rs::ensure_bucket` rather than shared, for the
+/// same layering reason `s3_test_config` gives.
+async fn ensure_bucket(cfg: &stepd_blobs_s3::S3Config) {
+    use rusty_s3::actions::CreateBucket;
+    use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
+
+    let bucket = Bucket::new(
+        cfg.endpoint.clone(),
+        UrlStyle::Path,
+        cfg.bucket.clone(),
+        cfg.region.clone(),
+    )
+    .expect("a usable bucket url");
+    let credentials = Credentials::new(cfg.access_key.clone(), cfg.secret_key.clone());
+    let url = CreateBucket::new(&bucket, &credentials).sign(std::time::Duration::from_secs(60));
+    let res = reqwest::Client::new()
+        .put(url)
+        .send()
+        .await
+        .expect("the test object store answers");
+    assert!(
+        res.status().is_success() || res.status() == reqwest::StatusCode::CONFLICT,
+        "creating the test bucket returned {}",
+        res.status()
+    );
+}
+
+/// A running server whose managed-blob backend is the real S3 backend
+/// (`stepd-blobs-s3`), plus what the no-bytes test needs to observe it: the
+/// resolved object-store config, for an out-of-band readback, and a
+/// per-instance counter of everything that has crossed the API socket.
+struct S3Fixture {
+    server: Arc<Server>,
+    namespace: String,
+    token: String,
+    base: String,
+    s3: stepd_blobs_s3::S3Config,
+    server_bytes: Arc<AtomicU64>,
+    _app: tokio::task::JoinHandle<()>,
+}
+
+async fn fixture_with_s3(label: &str) -> Option<S3Fixture> {
+    let database_url = std::env::var("STEPD_TEST_DATABASE_URL").ok()?;
+    let Some(s3) = s3_test_config() else {
+        eprintln!(
+            "SKIPPED: set STEPD_TEST_S3_ENDPOINT to run the S3 blob-backend \
+             end-to-end test. Without it nothing in this build proves BR-19 \
+             against a real object store on a real run — only against fakes."
+        );
+        return None;
+    };
+    ensure_bucket(&s3).await;
+
+    // Bound before the server is built, exactly as `fixture()` does: a blob
+    // capability has to be signed against the address the app will really
+    // reach.
+    let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_addr = api_listener.local_addr().unwrap();
+    let base = format!("http://{api_addr}");
+
+    let mut config = Config::from_env();
+    config.database_url = database_url;
+    config.blob_key = SIGNING_KEY.to_vec();
+    config.blob_backend = BlobBackendConfig::S3(stepd_server::S3ConfigInput {
+        endpoint: Some(s3.endpoint.clone()),
+        region: s3.region.clone(),
+        bucket: s3.bucket.clone(),
+        access_key: s3.access_key.clone(),
+        secret_key: s3.secret_key.clone(),
+        path_style: s3.path_style,
+    });
+    config.blob_base_url = base.clone();
+    config.egress = EgressPolicy::development();
+    config.default_keys = vec![SIGNING_KEY.to_vec()];
+    config.lease = chrono::Duration::seconds(30);
+    config.timer_jitter = chrono::Duration::zero();
+
+    let server = Arc::new(Server::build(config).await.expect("server"));
+    server.migrate().await.expect("migrate");
+
+    let namespace = format!("e2e-{label}-{}", &Uuid::new_v4().simple().to_string()[..8]);
+    server
+        .state
+        .store
+        .ensure_namespace(&namespace)
+        .await
+        .unwrap();
+    let token = mint(&server, &namespace, "admin").await;
+
+    // The app: a real SDK function whose one step puts bytes through
+    // `Blobs::put`, the same call an application would make.
+    let app_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let app_addr = app_listener.local_addr().unwrap();
+    let app_url = format!("http://{app_addr}");
+    let app = App::new("s3-blobs", app_url)
+        .signing_key(SIGNING_KEY.to_vec())
+        .function(
+            Function::new("s3-blob-upload")
+                .on_event("blob.created")
+                .run(s3_blob_upload),
+        );
+    let manifest = app.manifest();
+    let app_task = tokio::spawn(async move {
+        let _ = axum::serve(app_listener, app.router()).await;
+    });
+
+    // The API listener is wrapped, the app's is not: see `CountingListener`'s
+    // doc comment for why only this socket is the one the test needs a count
+    // of.
+    let server_bytes = Arc::new(AtomicU64::new(0));
+    let counted = CountingListener {
+        inner: api_listener,
+        bytes: server_bytes.clone(),
+    };
+    let router = server.router();
+    tokio::spawn(async move {
+        let _ = axum::serve(counted, router).await;
+    });
+
+    let res = reqwest::Client::new()
+        .put(format!("{base}/v1/apps"))
+        .bearer_auth(&token)
+        .json(&manifest)
+        .send()
+        .await
+        .expect("register");
+    assert_eq!(
+        res.status(),
+        200,
+        "registration failed: {:?}",
+        res.text().await
+    );
+
+    Some(S3Fixture {
+        server,
+        namespace,
+        token,
+        base,
+        s3,
+        server_bytes,
+        _app: app_task,
+    })
+}
+
+/// Same loop as `drive_until_done`, retyped for `S3Fixture` rather than
+/// generalised: the original is called from every test in this file, and
+/// reshaping it to take a trait for the sake of one more caller would touch
+/// every existing call site to save fifteen duplicated lines here.
+async fn drive_s3_until_done(f: &S3Fixture, run: Uuid, max_ticks: u32) -> String {
+    use stepd_core::traits::StateStore;
+    for _ in 0..max_ticks {
+        f.server
+            .dispatcher
+            .tick_namespace(&f.namespace)
+            .await
+            .unwrap();
+        f.server.housekeeper.tick().await;
+        if let Some(s) = f.server.store_status(run).await {
+            if s.is_terminal() {
+                return format!("{s:?}").to_lowercase();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let s = f.server.state.store.run_status(run).await.unwrap();
+    panic!("run {run} did not finish; last status {s:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_object_bytes_reach_the_server_on_the_s3_path() {
+    // BR-19's whole point, driven through a real run rather than asserted
+    // about a backend in isolation: a step result carries a `$blob`, the app
+    // put the bytes straight into the object store, and it is the
+    // dispatcher's op-commit verification (`Dispatcher::commit`, immediately
+    // before `store.commit` — there is no separate commit endpoint) that
+    // makes the reference readable. A `commit_blob` that downloaded the
+    // object to verify it would pass every other assertion in this file and
+    // fail only this one.
+    let Some(f) = fixture_with_s3("s3blob").await else {
+        return;
+    };
+
+    let baseline = f.server_bytes.load(Ordering::SeqCst);
+    assert!(
+        baseline > 0,
+        "app registration is real traffic through this socket; if the \
+         counter had not already moved before the run even started, it would \
+         not be wired to anything and the assertion below would prove nothing"
+    );
+
+    let ingested: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/v1/events", f.base))
+        .bearer_auth(&f.token)
+        .json(&serde_json::json!([{
+            "specversion": "1.0",
+            "source": "/blobs",
+            "type": "blob.created",
+            "data": { "stepd_base": f.base, "stepd_token": f.token },
+        }]))
+        .send()
+        .await
+        .expect("ingest")
+        .json()
+        .await
+        .expect("ingest body");
+    assert_eq!(ingested["runs_started"], 1);
+
+    let run: Uuid =
+        sqlx::query_scalar("SELECT id FROM runs WHERE ns = $1 ORDER BY started_at LIMIT 1")
+            .bind(&f.namespace)
+            .fetch_one(f.server.state.store.pool())
+            .await
+            .expect("a run was created");
+
+    let status = drive_s3_until_done(&f, run, 40).await;
+    assert_eq!(status, "completed");
+
+    let output: serde_json::Value = sqlx::query_scalar("SELECT output FROM runs WHERE id = $1")
+        .bind(run)
+        .fetch_one(f.server.state.store.pool())
+        .await
+        .unwrap();
+    let blob: Blob = serde_json::from_value(output).expect("run output is a $blob reference");
+    assert_eq!(blob.size(), S3_TEST_PAYLOAD.len() as i64);
+
+    // The property this test exists to prove: the run's own commit is what
+    // made the blob readable, not a call this test made. `Dispatcher::commit`
+    // verifies and commits a referenced blob in the same transaction as the
+    // run's ops (§8.3.2), so a run that reports "completed" has already left
+    // its blob rows `committed` — there is no other moment that could have
+    // done it, and nothing here calls one directly.
+    let state: String = sqlx::query_scalar("SELECT state::text FROM blobs WHERE id = $1")
+        .bind(blob.inner.id)
+        .fetch_one(f.server.state.store.pool())
+        .await
+        .expect("the blob row exists");
+    assert_eq!(
+        state, "committed",
+        "the run reported completed, so its blob reference must already be \
+         committed as a consequence of that commit"
+    );
+
+    // Readable, independent of anything this test asked the server to do: a
+    // presigned GET straight to the object store, signed locally against the
+    // same config the fixture gave the server. This does not test the same
+    // thing the byte counter below does — it would still pass even if
+    // `commit_blob` downloaded the object to verify it — it is here so that
+    // "committed but the bytes are not actually retrievable" is a distinct,
+    // separately-caught failure from "committed but unverified".
+    use stepd_core::traits::BlobBackend;
+    let backend = stepd_blobs_s3::S3Backend::new(f.s3.clone()).expect("a backend");
+    let read_url = backend
+        .read_url(blob.inner.id, blob.size(), chrono::Duration::seconds(60))
+        .expect("a read url");
+    let read = reqwest::Client::new()
+        .get(&read_url)
+        .send()
+        .await
+        .expect("the object store answers");
+    assert_eq!(read.status(), 200);
+    assert_eq!(read.bytes().await.unwrap().to_vec(), S3_TEST_PAYLOAD);
+
+    // The relay route (§8.3.2's fallback) must be absent for a real S3
+    // backend too, not only for `PresigningBackend`'s stub in
+    // `a_presigning_backend_does_not_expose_the_relay_route` above.
+    let relay = reqwest::Client::new()
+        .put(format!(
+            "{}/v1/blobs/{}/content?dir=write&size=1&exp=1&sig=x",
+            f.base,
+            Uuid::now_v7()
+        ))
+        .body("x")
+        .send()
+        .await
+        .expect("the server answered");
+    assert_eq!(
+        relay.status(),
+        404,
+        "the relay route must not exist for an S3 backend"
+    );
+
+    // The load-bearing assertion. Across app registration, ingest, the
+    // reservation call the app's own step made through the SDK, and the
+    // whole drive loop, the total bytes that ever crossed this server's own
+    // client-facing socket — both directions, everything `CountingListener`
+    // saw — stayed far below the payload's size. The upload itself,
+    // `S3_TEST_PAYLOAD.len()` bytes, went straight from the app's step to the
+    // object store; had it gone through this server instead, this counter
+    // would have moved by roughly that many bytes, not by the few kilobytes
+    // of JSON control traffic it actually carries.
+    //
+    // What this does not catch: a `commit_blob` that downloaded the object
+    // from the object store to hash it would add no bytes here at all — that
+    // traffic runs between this server process and the object store, never
+    // touching the socket this counter watches. `stepd-blobs-s3`'s own
+    // `a_committed_object_reports_its_digest_without_transferring_it` is what
+    // covers that path, and the CI lane runs both suites together for
+    // exactly this reason.
+    let total = f.server_bytes.load(Ordering::SeqCst);
+    assert!(
+        (total as usize) < S3_TEST_PAYLOAD.len() / 2,
+        "control-plane traffic totalled {total} bytes, which is not far \
+         enough below the {}-byte payload to rule out the payload itself \
+         having crossed this socket",
+        S3_TEST_PAYLOAD.len()
     );
 }
