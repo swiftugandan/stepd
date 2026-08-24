@@ -1838,8 +1838,10 @@ async fn no_object_bytes_reach_the_server_on_the_s3_path() {
     // counter cannot see it either.
     //
     // On CI: `tier 2 · integration` sets `STEPD_TEST_DATABASE_URL` and runs
-    // `cargo test --workspace`, so this test executes on every push and skips,
-    // because nothing in `.github/workflows/ci.yml` sets `STEPD_TEST_S3_*`.
+    // `cargo test --workspace`, so this test executes there and skips, because
+    // nothing in `.github/workflows/ci.yml` sets `STEPD_TEST_S3_*`. "There"
+    // being pushes to `main` and pull requests — `ci.yml:20-25` is the whole
+    // trigger, so a push to a branch with no PR open runs no lane at all.
     // The lane that would have was reverted pending separate review of how it
     // starts an S3-compatible service. So BR-19 on this path is proven by a
     // test that passes locally and by nothing CI runs.

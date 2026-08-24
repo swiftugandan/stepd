@@ -435,6 +435,16 @@ The `BlobStore` and `ExprEngine` traits from §6.3 were absent and are now prese
 Stated plainly, because a status table that overstates is how the last one went
 wrong.
 
+**As of 2026-08-23, and not maintained since.** This is a record of one
+reconciliation, not a live status board, and several rows below have been
+overtaken — the join policies were removed rather than implemented (ADR-023),
+the conformance suite has grown past the counts given here, and a benchmark
+harness exists for the reference implementation (`reference/bench.py`). For
+current status read `README.md` and `docs/GAPS.md`, and the [issue
+tracker](https://github.com/swiftugandan/stepd/issues) ahead of both. Left as
+written because a dated record that gets edited toward the present stops being
+evidence of what was true when it was taken.
+
 | Thing | State |
 |---|---|
 | Subject erasure (F-SEC-5) | **Schema only.** `subject_index` and `erasures` exist; no code reads `subject_key`. ADR-020 is `Proposed`. |

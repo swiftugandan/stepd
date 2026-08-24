@@ -246,8 +246,9 @@ verification, URL minting and deletion (§8.5).
   a 256 KiB payload reached the object store. All of these skip loudly without
   `STEPD_TEST_S3_*`, which no lane in `.github/workflows/ci.yml` sets. The end-to-end one
   needs `STEPD_TEST_DATABASE_URL` as well; CI does set that (`ci.yml:108`), so
-  `tier 2 · integration` runs the test on every push and it skips there for want of the S3
-  variables. Evidence that passes locally, then, and nothing automatic.
+  `tier 2 · integration` runs the test on pushes to `main` and on pull requests
+  (`ci.yml:20-25`), where it skips for want of the S3 variables. Evidence that passes
+  locally, then, and nothing automatic.
 * `rust/migrations/0001_initial.sql`: `blobs` carries `UNIQUE (ns, sha256)` commented "dedupe
   within a tenant, never across"; `blob_refs` is keyed `(blob_id, run_id, step_hash)`.
 * `spec/PROTOCOL.md` §8 is the normative statement; `rust/crates/stepd-cli/src/doctor.rs`

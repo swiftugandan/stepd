@@ -75,8 +75,9 @@ overstated the opposite way and that is how four defects sat undetected.
   `STEPD_TEST_S3_*`, and no lane in `.github/workflows/ci.yml` sets it —
   `grep -c STEPD_TEST_S3 .github/workflows/ci.yml` is 0. (The end-to-end one
   also needs `STEPD_TEST_DATABASE_URL`, which CI *does* set at `ci.yml:108`, so
-  `tier 2 · integration` compiles and runs that test on every push — and it
-  skips, for want of the S3 variables.) So this is evidence that exists and
+  `tier 2 · integration` compiles and runs that test on pushes to `main` and on
+  pull requests — `ci.yml:20-25` is the whole trigger, so a push to a branch with
+  no PR open runs nothing — and it skips there, for want of the S3 variables.) So this is evidence that exists and
   passes locally, and no evidence that is produced automatically.
   `docs/blob-backends.md` records what
   MinIO `RELEASE.2025-09-07T16-13-09Z` and RustFS `v1.0.0-beta.12` actually did
@@ -507,7 +508,8 @@ and skipped counts, and — if the sweep gave up on a schedule — why.
    independent implementation reaching level 2 is the claim the protocol is
    actually making.
 4. **Get the CI lanes green, and add one for the S3 backend.**
-   `.github/workflows/ci.yml` runs on every push; as of run `32688345824` four
+   `.github/workflows/ci.yml` runs on pushes to `main`, on pull requests and
+   nightly (`ci.yml:20-25`); as of run `32688345824` four
    of six lanes pass and two do not — `tier 3 · through pgbouncer (F-DL-1)`,
    which is the lane that turns "we only use row-level locks" from an assertion
    into evidence, and `tier 4 · soak (nightly)`. Nothing sets `STEPD_TEST_S3_*`

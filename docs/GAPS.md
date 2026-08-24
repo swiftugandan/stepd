@@ -4,7 +4,7 @@
 |---|---|
 | Version | 1.0 |
 | Date | 2026-08-22 |
-| Status | Every gap below carries a resolution. Open items are named in the resolution cells themselves — A15's "Still open" is the current one. This whole file is a snapshot from when it was last edited; the [issue tracker](https://github.com/swiftugandan/stepd/issues) is the live list, and it wins where the two disagree |
+| Status | Every gap below carries a resolution. Work that is still open is named in two places: inside the resolution cells — A15's "Still open", D7's threat model and disclosure process — and in the *Artifacts still to produce* table, which still lists the threat model, the risk-zone ownership map, CONTRIBUTING/SECURITY.md/CoC, the absent `paths:` filter and the unrehearsed runbooks. This file is a snapshot, statuses last re-checked 2026-08-24; the [issue tracker](https://github.com/swiftugandan/stepd/issues) is the live list and wins where the two disagree |
 
 Every gap identified in the implementation readiness review, with where it is now resolved
 and what remains genuinely open. Severity is the cost of discovering it late:
@@ -117,7 +117,7 @@ superseded the prototype, the row says so.
 | Rust SDK design doc (short-circuit control flow — the subtlest code in the project) | **Written, and the SDK built from it**: `docs/SDK-DESIGN-rust.md` and `docs/sdk-prototype/` (property and adversarial tests, an `eager_claim` example), then `stepd-sdk-core` (32 tests) and `stepd-sdk` (30) | M1 |
 | Simulation harness design | **Built**, twice: `reference/simulation.py` against the model and `rust/crates/stepd-store-postgres/tests/simulation.rs` (5 tests) against the real engine; `reference/coverage_check.py` reports never-exercised paths | M0.5 |
 | Risk-zone ownership map (drives selective test execution) | Specified, not built | M0.5 |
-| Tiered CI configuration with enforced time budgets | **Built**: `.github/workflows/ci.yml` has six lanes across tiers 1–4 with the budgets in their names. The diff-driven selective execution PRD §10.2 also asks for is *not* there — no lane carries a `paths:` filter | M0.5 |
+| Tiered CI configuration with enforced time budgets | **Tiers built, budgets not enforced.** `.github/workflows/ci.yml` has six lanes across tiers 1–4; three name a time budget (`≤10s`, `≤5min`, `≤30min`), one names a cadence (`nightly`), and two — `tier 1 · crate boundaries` and `tier 3 · through pgbouncer` — name neither. Nothing holds a lane to its budget: the `timeout-minutes` guards are 10/10/20/30/40/360, each far above the budget beside it, so they catch a hang and not a lane that has outgrown its tier. PRD §10.2's diff-driven selective execution is absent too — no lane carries a `paths:` filter | M0.5 |
 | ADRs 001–023 | **Written** — 23 files under `docs/adr/` | M0.5 |
 | Console IA and wireframes | **Built and tested** (`reference/console.html`, 17 assertions incl. content-safety audit and the operator flow; the shipped console is `rust/crates/stepd-server/assets/console.html`) | M3 |
 | Threat model | Not started | M4 |
