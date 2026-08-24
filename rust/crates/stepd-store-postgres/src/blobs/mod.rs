@@ -30,7 +30,6 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
-use std::path::PathBuf;
 use std::sync::Arc;
 use stepd_core::traits::{BlobBackend, BlobSpec, BlobStore, RelayBytes, Reservation};
 use stepd_core::{Error, Result};
@@ -44,10 +43,11 @@ pub use filesystem::FilesystemBackend;
 
 /// Blob index in Postgres; bytes and transfer URLs come from a [`BlobBackend`].
 ///
-/// [`PostgresBlobStore::new`] builds a [`FilesystemBackend`], which is what
-/// makes `stepd dev` work with no cloud account and what CI uses. Nothing in
-/// this struct's `BlobStore` methods knows that, though — they only ever call
-/// through the trait, which is what makes another backend a drop-in swap.
+/// The server builds a [`FilesystemBackend`] and passes it to
+/// [`PostgresBlobStore::with_backend_and_relay`], which is what makes `stepd
+/// dev` work with no cloud account and what CI uses. Nothing in this struct's
+/// `BlobStore` methods knows that, though — they only ever call through the
+/// trait, which is what makes another backend a drop-in swap.
 #[derive(Clone)]
 pub struct PostgresBlobStore {
     pool: sqlx::PgPool,
@@ -168,6 +168,14 @@ pub fn attach_read_urls(backend: &dyn BlobBackend, value: &mut serde_json::Value
                             blob.insert("url".into(), serde_json::Value::String(url));
                         }
                         Err(e) => {
+                            // §8.3.1: `url` is never supplied by the app and must not be
+                            // persisted by an SDK, so a value already sitting here did not
+                            // come from us. A reference the backend refused to sign must
+                            // reach the attempt with no URL at all, not with whatever else
+                            // was in that key — a range read does not verify the digest of
+                            // what it fetches, so a stale or attacker-supplied URL left in
+                            // place would be trusted with nothing left to catch it.
+                            blob.remove("url");
                             tracing::warn!(
                                 blob = %id, error = %e,
                                 "failed to mint a read url for this blob reference; \
@@ -192,24 +200,11 @@ pub fn attach_read_urls(backend: &dyn BlobBackend, value: &mut serde_json::Value
 }
 
 /// Ceiling on a single managed blob (protocol §8.2), for stores built with
-/// [`PostgresBlobStore::new`] or [`PostgresBlobStore::with_backend`] that do not
-/// override it with [`PostgresBlobStore::with_max_size`].
+/// [`PostgresBlobStore::with_backend`] that do not override it with
+/// [`PostgresBlobStore::with_max_size`].
 const DEFAULT_MAX_SIZE: i64 = 100 * 1024 * 1024;
 
 impl PostgresBlobStore {
-    /// Build a store rooted at `root`, minting URLs under `base_url`, with bytes
-    /// on the local filesystem.
-    pub fn new(
-        pool: sqlx::PgPool,
-        root: impl Into<PathBuf>,
-        base_url: impl Into<String>,
-        key: Vec<u8>,
-    ) -> Self {
-        let caps = Capability::new(base_url, key);
-        let fs = Arc::new(FilesystemBackend::new(root.into(), caps.clone()));
-        Self::with_backend_and_relay(pool, fs.clone(), Some(fs as Arc<dyn RelayBytes>), caps)
-    }
-
     /// Build a store whose bytes live wherever `backend` puts them, with no
     /// relay: the backend must presign, or the transfer endpoints will refuse
     /// every request (Task 3 stops mounting them for a backend like this).
@@ -658,6 +653,87 @@ mod tests {
             v["receipts"][0]["file"]["$blob"]["url"],
             serde_json::json!(format!("stub://{id}/7")),
             "the backend's URL must reach the attempt"
+        );
+    }
+
+    /// A backend whose `read_url` fails for exactly one id and succeeds for
+    /// any other, so a test can prove a failure on one reference does not
+    /// stop the walk from reaching a sibling. Per-instance state (`fails` is
+    /// a field, set fresh by each test), never a `static` — two tests sharing
+    /// mutable state through one has broken this codebase more than once.
+    struct FailingBackend {
+        fails: Uuid,
+    }
+
+    #[async_trait]
+    impl BlobBackend for FailingBackend {
+        async fn upload_target(&self, _: Uuid, _: &BlobSpec, _: Duration) -> Result<UploadTarget> {
+            unimplemented!("not exercised by the read path")
+        }
+        fn read_url(&self, id: Uuid, size: i64, _: Duration) -> Result<String> {
+            if id == self.fails {
+                Err(Error::Store(format!("cannot sign a read url for {id}")))
+            } else {
+                Ok(format!("stub://{id}/{size}"))
+            }
+        }
+        async fn stored(&self, _: Uuid) -> Result<Option<StoredObject>> {
+            Ok(None)
+        }
+        async fn delete(&self, _: Uuid) -> Result<()> {
+            Ok(())
+        }
+        fn can_presign(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_read_url_failure_on_one_reference_does_not_stop_the_walk() {
+        // Guards the skip-and-continue resolution: failing to sign one of
+        // several references must not fail the whole attempt. The sibling
+        // getting its url is the part that actually proves the walk
+        // continued rather than bailing on the first failure — a test that
+        // only checked the failing reference would pass just as well under
+        // a `return` on the first error.
+        let failing = Uuid::now_v7();
+        let ok = Uuid::now_v7();
+        let mut v = serde_json::json!({
+            "broken": { "$blob": { "id": failing, "size": 7, "sha256": "ab" } },
+            "fine": { "$blob": { "id": ok, "size": 3, "sha256": "cd" } },
+        });
+        let backend = FailingBackend { fails: failing };
+        attach_read_urls(&backend, &mut v, Duration::seconds(60));
+        assert!(
+            v["broken"]["$blob"].get("url").is_none(),
+            "a reference the backend could not sign must carry no url"
+        );
+        assert_eq!(
+            v["fine"]["$blob"]["url"],
+            serde_json::json!(format!("stub://{ok}/3")),
+            "a sibling reference must still get a fresh url after another one failed"
+        );
+    }
+
+    #[test]
+    fn a_read_url_failure_clears_any_preexisting_url_rather_than_leaving_it() {
+        // Guards against a stale or app-supplied `url` surviving a signing
+        // failure. Unreachable with today's filesystem backend, which cannot
+        // fail, but load-bearing once a presigning backend can: the SDK does
+        // not verify a digest on a ranged read, so a URL left in place here
+        // would be trusted with nothing left to catch it.
+        let id = Uuid::now_v7();
+        let mut v = serde_json::json!({
+            "$blob": {
+                "id": id, "size": 7, "sha256": "ab",
+                "url": "http://stale.example/leaked",
+            }
+        });
+        let backend = FailingBackend { fails: id };
+        attach_read_urls(&backend, &mut v, Duration::seconds(60));
+        assert!(
+            v["$blob"].get("url").is_none(),
+            "a value already present under `url` did not come from us and must not survive"
         );
     }
 }
