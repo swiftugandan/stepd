@@ -59,13 +59,20 @@ the §8.3.2 relay. A backend that presigns mints its own URL instead, with the s
 properties carried by its own signature: `stepd-blobs-s3` signs the object key, the method,
 the declared length and the digest, and the URL expires.
 
-**Content is verified before the blob becomes readable.** `commit_blob` asks the backend
+**Content is verified before the blob is committed** (§8.3.2). `commit_blob` asks the backend
 what it holds (`BlobBackend::stored`), compares length and SHA-256 against what was declared,
 and only then sets `state='committed'`. Without it a compromised upload URL used in time
 could substitute different content for a reference already committed into a step result, and
 every later read would return the substituted bytes with nothing indicating a change. Which
 call answers "and what is its digest" is the backend's business: object storage reads it from
 metadata the store computed itself, the filesystem has no metadata and reads the bytes.
+
+*Committed*, not *readable* — the two are not the same here, and the spec's word is the
+stronger one. `attach_read_urls` mints a read URL from the backend with no database lookup
+and no state check at all, so a `reserved` blob whose digest nobody has checked is already
+dereferenceable. What commit actually gates is collection: an uncommitted row is taken by the
+reservation sweep. Closing the gap between the two would mean `attach_read_urls` consulting
+`state`, which it does not.
 
 **Content addressing is per namespace, never global.** `UNIQUE (ns, sha256)` on `blobs`
 (`rust/migrations/0001_initial.sql`); `reserve` looks up `WHERE ns=$1 AND sha256=$2`. A
@@ -126,16 +133,25 @@ verification, URL minting and deletion (§8.5).
   signature, so the store rejects mismatched bytes itself and `stored` answers from a
   `HeadObject`. The server issues only `HeadObject` and `DeleteObject` against an object
   store; it never transfers an object.
-* **Nothing tests that.** What keeps the download out of the S3 path is structural — the
-  download lives only in the `stored() == None` arm, and `S3Backend::stored` errors rather
-  than returning `None` when the store reports no checksum — and no test in either crate
-  fails if that changes. `no_object_bytes_reach_the_server_on_the_s3_path` counts bytes on
-  the server's client-facing socket, which a server-to-store download would not touch.
-* **§8.3.4 is covered at one entry point, not everywhere.** `Dispatcher::commit` verifies the
-  `$blob` references in an attempt envelope's ops and emitted events — which includes the
-  `invoke` and `continue_as_new` run inputs. A `$blob` arriving in an ingested event or a
-  `resolve-wait` payload reaches no `commit_blob` call, so on a presigning backend its row
-  stays `reserved` and the collector takes the bytes after the reservation window.
+* **One shape of that regression escapes every test.** An `S3Backend::stored` that fetched
+  the object and hashed it itself, still returning `Some(digest)`, would pass everything:
+  `a_committed_object_reports_its_digest_without_transferring_it` measures the answer and not
+  the transfer, and says so in its own comment, and
+  `no_object_bytes_reach_the_server_on_the_s3_path` counts bytes on the server's
+  client-facing socket, which server-to-store traffic never crosses. The other shape is
+  caught twice: `stored` returning `None`, which routes `commit_blob` into its read-and-hash
+  arm, fails `an_object_the_store_reports_no_checksum_for_is_an_error_not_a_fallback`, and on
+  a real deployment fails the commit loudly regardless, because that arm calls
+  `PostgresBlobStore::get_bytes` and `Server::build` gives the S3 store `relay: None`, which
+  makes `get_bytes` an error rather than a download.
+* **§8.3.2's verify-before-readable is enforced at one entry point, not everywhere.**
+  `Dispatcher::commit` verifies the `$blob` references in an attempt envelope's ops and
+  emitted events — which includes the `invoke` and `continue_as_new` run inputs. A `$blob`
+  arriving in an ingested event or a `resolve-wait` payload reaches no `commit_blob` call, so
+  on a presigning backend its row stays `reserved` and the collector takes the bytes after
+  the reservation window. §8.3.4 — the *reference* obligation — is a different clause and is
+  not affected: `runs_record_blob_refs` fires on `INSERT OR UPDATE OF input, output ON runs`,
+  so those blobs do get their `blob_refs` rows.
 * **`commit_blob` performs no namespace check**, and neither does `attach_read_urls` or
   `presign_read` — a blob is looked up by id alone. Op-commit is the first place an
   app-supplied id drives a `reserved → committed` transition, so this is the first place it
@@ -148,8 +164,8 @@ verification, URL minting and deletion (§8.5).
 * The S3 backend depends on the object store enforcing a checksum it signed, and not every
   S3-compatible server does. `docs/blob-backends.md` records what MinIO
   `RELEASE.2025-09-07T16-13-09Z` and RustFS `v1.0.0-beta.12` were observed to do — both
-  reject a mismatched body, but RustFS is at release-candidate maturity and names the wrong
-  header (`Content-Md5`) when it does.
+  reject a mismatched body, but RustFS is a beta release and names the wrong header
+  (`Content-Md5`) when it does.
 
 ## Alternatives considered
 
@@ -215,15 +231,18 @@ verification, URL minting and deletion (§8.5).
   `rust/crates/stepd-blobs-s3/tests/live.rs` —
   `the_store_refuses_bytes_that_do_not_match_the_declared_digest`,
   `a_client_cannot_swap_the_checksum_for_one_matching_its_own_bytes`,
-  `an_object_the_store_reports_no_checksum_for_is_an_error_not_a_fallback`,
-  `a_committed_object_reports_its_digest_without_transferring_it`,
+  `an_object_the_store_reports_no_checksum_for_is_an_error_not_a_fallback` (the one that
+  fails if `stored` starts reporting `None` and routing commits into the read-and-hash arm),
+  `a_committed_object_reports_its_digest_without_transferring_it` (which asserts the digest
+  is right, *not* that no transfer happened — see "What we accept"),
   `a_presigned_read_serves_a_range`, `deleting_an_object_is_idempotent` — and
   `no_object_bytes_reach_the_server_on_the_s3_path` in
   `rust/crates/stepd-server/tests/end_to_end.rs`, which drives a real run through a real SDK
   app and asserts that everything crossing the server's own socket stayed under 32 KiB while
   a 256 KiB payload reached the object store. All of these skip loudly without
-  `STEPD_TEST_S3_*`, and no lane in `.github/workflows/ci.yml` sets it: this is evidence that
-  passes locally and evidence nothing produces automatically.
+  `STEPD_TEST_S3_*`, the end-to-end one also without `STEPD_TEST_DATABASE_URL`, and no lane
+  in `.github/workflows/ci.yml` sets either: this is evidence that passes locally and
+  evidence nothing produces automatically.
 * `rust/migrations/0001_initial.sql`: `blobs` carries `UNIQUE (ns, sha256)` commented "dedupe
   within a tenant, never across"; `blob_refs` is keyed `(blob_id, run_id, step_hash)`.
 * `spec/PROTOCOL.md` §8 is the normative statement; `rust/crates/stepd-cli/src/doctor.rs`
