@@ -149,16 +149,19 @@ impl PostgresStore {
     /// a `$blob` cannot be there to sign if nothing could have minted one.
     ///
     /// Minting a URL is not a statement that the bytes were verified, and on
-    /// one path they were not. `Dispatcher::verify_blobs` is still the only
-    /// caller of `commit_blob` on the serving path, so a `$blob` that arrived
-    /// in an event ingested through `POST /v1/events` — and so into
-    /// `runs.input` — has had its declared digest checked by nobody, and
-    /// `stepd-sdk`'s `fetch` does not re-check it on read either. That gap is
-    /// the one README records under "a `$blob` that arrives outside an attempt
-    /// envelope is still never verified"; it is not created here, but this is
-    /// what makes it reachable, and the fix belongs at the ingest end rather
-    /// than in withholding a URL from every reference including the verified
-    /// ones.
+    /// one path they were not. `commit_blob` has exactly two callers on the
+    /// serving path — `Dispatcher::verify_blobs` and the relay endpoint in
+    /// `stepd-server/src/blobs.rs` — and neither runs for a `$blob` that
+    /// arrived in an event ingested through `POST /v1/events` — and so into
+    /// `runs.input` — so its declared digest has been checked by nobody.
+    /// `stepd-sdk`'s `Blobs::read` does hash a full read and compare it
+    /// against the reference's declared `sha256` by default, but that only
+    /// proves the bytes match a digest that was itself never checked against
+    /// the object. That gap is the one README records under "a `$blob` that
+    /// arrives outside an attempt envelope is still never verified"; it is
+    /// not created here, but this is what makes it reachable, and the fix
+    /// belongs at the ingest end rather than in withholding a URL from every
+    /// reference including the verified ones.
     fn mint_read_urls<'a>(&self, values: impl IntoIterator<Item = &'a mut serde_json::Value>) {
         let Some(backend) = &self.blob_backend else {
             return;
@@ -299,9 +302,9 @@ const SHIPPABLE: &str = "status IN ('completed','failed','timed_out','cancelled'
 ///
 /// Short on purpose (protocol §8.3.1): the URL is minted per attempt and must
 /// never be persisted by an SDK, so it only has to outlive the attempt that
-/// received it. A `chrono::Duration` cannot be built in a `const`, so this is
-/// the number and `PostgresStore::mint_read_urls` is the one place that wraps
-/// it.
+/// received it. Kept as the raw number, with `PostgresStore::mint_read_urls`
+/// as the one place that wraps it in a `chrono::Duration`, so every caller
+/// reads the same value instead of each constructing its own `Duration`.
 const BLOB_READ_TTL_SECONDS: i64 = 300;
 
 /// Inline journal ceiling for one attempt, in steps.

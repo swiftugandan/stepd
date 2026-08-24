@@ -182,8 +182,8 @@ mod tests {
 
     #[test]
     fn the_filesystem_backend_admits_it_cannot_presign() {
-        // This is what mounts the relay route in Task 3. If it ever returns
-        // true, bytes stop being relayed and start being lost.
+        // `Server::router()` mounts the relay route when `!can_presign()`. If
+        // this ever returns true, bytes stop being relayed and start being lost.
         let (_dir, b) = backend();
         assert!(!b.can_presign());
     }

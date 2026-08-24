@@ -123,9 +123,15 @@ overstated the opposite way and that is how four defects sat undetected.
   get its `blob_refs` row. It is verification, not reference counting, that has
   one entry point. Since `load_attempt` began minting read URLs for
   `RunContext.input` and the trigger events as well as the journal, an app can
-  also *read* such a blob — `stepd-sdk`'s `fetch` does not check the digest on
-  read either — where before it received a reference with no `url` and could
-  not. That does not widen the verification gap, but it does make it reachable;
+  also *read* such a blob, where before it received a reference with no `url`
+  and could not. That read is not the unverified step: `stepd-sdk`'s
+  `Blobs::read` hashes a full read and compares it against the reference's
+  declared `sha256` by default (`verify_on_read` defaults to `true`). What
+  stays unverified is the row — nothing ever compared the object to the digest
+  the app declared, so `read`'s check only confirms the bytes match a `sha256`
+  that was itself never checked, and a ranged read (`Blobs::read_range`)
+  cannot make even that check, because a byte range does not hash to the whole
+  object's digest. That does not widen the verification gap, but it does make it reachable;
   the remedy is verification at ingest, not withholding a URL from every
   reference including the ones the dispatcher did verify.
 * **`commit_blob` does no namespace check**, and neither does `attach_read_urls`
