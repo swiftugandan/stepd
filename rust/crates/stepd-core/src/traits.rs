@@ -523,6 +523,22 @@ pub trait BlobBackend: Send + Sync + 'static {
     fn can_presign(&self) -> bool;
 }
 
+/// Raw byte transfer through the control plane, for backends that cannot presign.
+///
+/// Separate from [`BlobBackend`] because it is the fallback path, not the
+/// normal one: protocol §8.3.2 exists so a store with no signer of its own can
+/// still work, and a backend that presigns must not be able to answer these at
+/// all. If an S3 backend could implement this, the relay would be reachable for
+/// a store that has no reason to relay.
+#[async_trait]
+pub trait RelayBytes: Send + Sync + 'static {
+    /// Store bytes for a reserved blob, after the caller has verified the capability.
+    async fn put_bytes(&self, id: Uuid, bytes: &[u8]) -> Result<()>;
+
+    /// Read a committed blob, optionally a byte range (protocol §8.3.3).
+    async fn get_bytes(&self, id: Uuid, range: Option<(u64, u64)>) -> Result<Vec<u8>>;
+}
+
 /// Where to send bytes for a reserved blob.
 #[derive(Debug, Clone)]
 pub struct UploadTarget {

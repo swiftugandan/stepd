@@ -19,7 +19,7 @@ use std::sync::Arc;
 use stepd_core::traits::*;
 use stepd_core::{DispatchConfig, Dispatcher, Housekeeper, KeeperConfig, TargetResolver};
 use stepd_proto::*;
-use stepd_store_postgres::PostgresStore;
+use stepd_store_postgres::{Capability, PostgresBlobStore, PostgresStore};
 use uuid::Uuid;
 
 /// Connect and migrate, or skip.
@@ -720,4 +720,108 @@ async fn the_journal_pages_without_dropping_or_repeating_steps() {
     unique.dedup();
     assert_eq!(seen.len(), 25, "every step appears");
     assert_eq!(unique.len(), 25, "and none appears twice");
+}
+
+/// A `BlobBackend` whose `delete` succeeds for exactly one chosen id and
+/// fails for everything else, so a test can provoke
+/// `PostgresBlobStore::collect`'s error path without depending on a real
+/// filesystem permission failure — and, because `collect` sweeps the whole
+/// database with no namespace filter, without the assertion being at the
+/// mercy of whatever other blobs a long-lived shared test database happens
+/// to be holding. Only the row this test seeds and asks to succeed can ever
+/// be collected; every other id, however many exist, reports failure and is
+/// left untouched. Nothing but `delete` is exercised by that path, so the
+/// rest are `unimplemented!` rather than faked.
+struct FlakyBackend {
+    succeeds: Uuid,
+}
+
+#[async_trait::async_trait]
+impl BlobBackend for FlakyBackend {
+    async fn upload_target(
+        &self,
+        _id: Uuid,
+        _spec: &BlobSpec,
+        _ttl: Duration,
+    ) -> stepd_core::Result<UploadTarget> {
+        unimplemented!("collect() never mints an upload target")
+    }
+
+    fn read_url(&self, _id: Uuid, _size: i64, _ttl: Duration) -> stepd_core::Result<String> {
+        unimplemented!("collect() never mints a read url")
+    }
+
+    async fn stored(&self, _id: Uuid) -> stepd_core::Result<Option<StoredObject>> {
+        unimplemented!("collect() never asks what is stored")
+    }
+
+    async fn delete(&self, id: Uuid) -> stepd_core::Result<()> {
+        if id == self.succeeds {
+            Ok(())
+        } else {
+            Err(stepd_core::Error::Store("simulated delete failure".into()))
+        }
+    }
+
+    fn can_presign(&self) -> bool {
+        false
+    }
+}
+
+/// `collect` used to either lose orphaned bytes silently (swallow every
+/// delete error and remove the row anyway) or, in an earlier draft of this
+/// refactor, let one bad object block the whole sweep forever. Neither is
+/// right: a delete failure must be logged, the row must survive so
+/// `stepd doctor` can still report the orphaned bytes, and collection must
+/// carry on to the objects that do delete cleanly, returning a count that
+/// reflects what actually got collected.
+#[tokio::test]
+async fn a_delete_failure_during_collection_leaves_that_row_and_still_collects_the_rest() {
+    let s = db_test!(store);
+    let ns = namespace(&s, "blobcollect").await;
+
+    // Both eligible for collection: reserved well before the cutoff, never
+    // committed. Distinct digests: (ns, sha256) is unique.
+    let stays = Uuid::now_v7();
+    let goes = Uuid::now_v7();
+    for (id, digest_byte) in [(stays, 0u8), (goes, 1u8)] {
+        sqlx::query(
+            "INSERT INTO blobs (id, ns, size, sha256, state, reserved_at)
+             VALUES ($1, $2, 1, $3, 'reserved', now() - interval '1 hour')",
+        )
+        .bind(id)
+        .bind(&ns)
+        .bind(vec![digest_byte; 32])
+        .execute(s.pool())
+        .await
+        .expect("seed a blob row directly, bypassing reserve()");
+    }
+
+    // `succeeds: goes` means every other id on the whole shared database —
+    // including anything left over from unrelated test runs — reports a
+    // delete failure and is left alone; only `goes` can possibly be counted.
+    let backend = Arc::new(FlakyBackend { succeeds: goes });
+    let caps = Capability::new("http://localhost:8080", b"k".to_vec());
+    let blobs = PostgresBlobStore::with_backend(s.pool().clone(), backend, caps);
+
+    let collected = blobs
+        .collect(Utc::now() - Duration::minutes(1))
+        .await
+        .expect("collect must not abort on one bad delete");
+    assert_eq!(
+        collected, 1,
+        "only the blob whose bytes actually got deleted counts"
+    );
+
+    let remaining: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM blobs WHERE ns = $1")
+        .bind(&ns)
+        .fetch_all(s.pool())
+        .await
+        .expect("query the survivors");
+    assert_eq!(
+        remaining,
+        vec![stays],
+        "the row for the failed delete must survive: it is the only remaining \
+         record that bytes are still there for stepd doctor to report"
+    );
 }

@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use chrono::Duration;
 use std::path::{Path, PathBuf};
-use stepd_core::traits::{BlobBackend, BlobSpec, StoredObject, UploadTarget};
+use stepd_core::traits::{BlobBackend, BlobSpec, RelayBytes, StoredObject, UploadTarget};
 use stepd_core::{Error, Result};
 use uuid::Uuid;
 
@@ -52,10 +52,13 @@ impl FilesystemBackend {
             _ => path.starts_with(&self.root),
         }
     }
+}
 
+#[async_trait]
+impl RelayBytes for FilesystemBackend {
     /// Store bytes for a reserved blob. Called by the server's relay endpoint
     /// after it has verified the capability.
-    pub async fn put_bytes(&self, id: Uuid, bytes: &[u8]) -> Result<()> {
+    async fn put_bytes(&self, id: Uuid, bytes: &[u8]) -> Result<()> {
         let path = self.path(id);
         if let Some(dir) = path.parent() {
             tokio::fs::create_dir_all(dir)
@@ -75,7 +78,7 @@ impl FilesystemBackend {
     }
 
     /// Read a committed blob, optionally a byte range (protocol §8.3.3).
-    pub async fn get_bytes(&self, id: Uuid, range: Option<(u64, u64)>) -> Result<Vec<u8>> {
+    async fn get_bytes(&self, id: Uuid, range: Option<(u64, u64)>) -> Result<Vec<u8>> {
         let bytes = tokio::fs::read(self.path(id))
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
