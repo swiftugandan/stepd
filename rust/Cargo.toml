@@ -54,6 +54,7 @@ clap       = { version = "4", features = ["derive", "env"] }
 rand       = "0.8"
 humantime  = "2"
 futures    = "0.3"
+tempfile   = "3"
 
 [profile.release]
 lto = "thin"
