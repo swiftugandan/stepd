@@ -75,9 +75,16 @@ impl Finding {
 /// Run every check.
 ///
 /// `blob_backend` is the server's configured backend, not read from the
-/// database: an S3 misconfiguration is exactly the kind of thing that keeps
-/// the main server from starting at all, and `doctor` has to be runnable then
-/// too (module docs). The check it drives lives beside `orphaned_blobs`.
+/// database. It drives one check, beside `orphaned_blobs`, and only for one
+/// class of S3 misconfiguration: `Server::build` — which `doctor` goes
+/// through too, via the same `build()` in `main.rs` — already refuses to
+/// start at all when a required `STEPD_BLOB_S3_*` variable is *absent*, so
+/// `doctor` never gets this far in that case either; nothing here is reached.
+/// What survives to be checked here is a config that is *present but wrong*:
+/// a bucket, endpoint and both keys that are all set, but a key that is
+/// rejected or an endpoint nothing answers on. That is exactly the case
+/// `serve` cannot catch at startup and an operator otherwise learns about
+/// from a failed upload, so it is worth `doctor` diagnosing on its own.
 pub async fn run(pool: &PgPool, blob_backend: &stepd_server::BlobBackendConfig) -> Vec<Finding> {
     let mut out = Vec::new();
     out.push(schema_version(pool).await);
@@ -338,16 +345,31 @@ async fn orphaned_blobs(pool: &PgPool) -> Finding {
     }
 }
 
-/// Whether the configured S3 bucket is there and these credentials can use it.
+/// Whether this backend's credentials can reach and use the configured
+/// endpoint and bucket.
 ///
 /// Wrong credentials or an unreachable endpoint today surface only when an
 /// app's first upload fails — a `blob_backend_unavailable` three systems away
-/// from whoever configured them. This is a `HeadBucket`, not a write, so it is
-/// safe to run against a bucket the server should not be able to write to
-/// either, and it is what lets an operator learn the answer at the same
-/// moment they learn everything else `doctor` checks.
-async fn s3_bucket_reachable(cfg: &stepd_blobs_s3::S3Config) -> Finding {
-    let backend = match stepd_blobs_s3::S3Backend::new(cfg.clone()) {
+/// from whoever configured them. `S3Backend::check_bucket` probes with a
+/// `HeadObject`, not a write and not a `HeadBucket`: see its doc comment for
+/// why `HeadBucket` would fail a correctly least-privileged deployment. `s3`
+/// arriving here is always a resolved, complete config in practice — `serve`
+/// and `doctor` both go through `Server::build`, which refuses to start
+/// before either gets this far — but `resolve()` is called again rather than
+/// trusted, on the same reasoning as its own doc comment.
+async fn s3_bucket_reachable(s3: &stepd_server::S3ConfigInput) -> Finding {
+    let cfg = match s3.resolve() {
+        Ok(c) => c,
+        Err(e) => {
+            return Finding::critical(
+                "blob-store",
+                format!("S3 configuration is incomplete: {e}"),
+                "this should be unreachable — serve and doctor both refuse to start with \
+                 an incomplete S3 backend. If you see this, file it as a bug",
+            )
+        }
+    };
+    let backend = match stepd_blobs_s3::S3Backend::new(cfg) {
         Ok(b) => b,
         Err(e) => {
             return Finding::critical(
@@ -359,18 +381,21 @@ async fn s3_bucket_reachable(cfg: &stepd_blobs_s3::S3Config) -> Finding {
         }
     };
     match backend.check_bucket().await {
-        stepd_blobs_s3::BucketCheck::Reachable => {
-            Finding::ok("blob-store", "S3 bucket reachable and authorised")
-        }
+        stepd_blobs_s3::BucketCheck::Reachable => Finding::ok(
+            "blob-store",
+            "S3 endpoint reachable and these credentials can read from it (a HeadObject \
+             probe on a key that cannot exist, so this cannot by itself tell an absent \
+             bucket apart from a present one that simply has nothing at that key)",
+        ),
         stepd_blobs_s3::BucketCheck::Forbidden => Finding::critical(
             "blob-store",
-            "S3 bucket reachable, but the configured credentials were refused (403)",
+            "S3 endpoint reachable, but the configured credentials were refused (403)",
             "check STEPD_BLOB_S3_ACCESS_KEY and STEPD_BLOB_S3_SECRET_KEY; see \
              docs/blob-backends.md for object stores this backend has been verified against",
         ),
         stepd_blobs_s3::BucketCheck::Unreachable(detail) => Finding::critical(
             "blob-store",
-            format!("S3 bucket unreachable: {detail}"),
+            format!("S3 endpoint unreachable: {detail}"),
             "check STEPD_BLOB_S3_ENDPOINT, STEPD_BLOB_S3_PATH_STYLE and network egress; see \
              docs/blob-backends.md for object stores this backend has been verified against",
         ),

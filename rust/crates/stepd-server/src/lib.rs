@@ -40,6 +40,7 @@ use stepd_core::{DispatchConfig, Dispatcher, Housekeeper, KeeperConfig};
 use stepd_expr_cel::CelEngine;
 use stepd_store_postgres::PostgresStore;
 use stepd_transport_http::{EgressPolicy, HttpTransport};
+use url::Url;
 
 pub use registry::DbTargetResolver;
 pub use runner::Runner;
@@ -121,17 +122,107 @@ pub enum BlobBackendConfig {
     },
     /// Bytes in an S3-compatible object store, reached with presigned URLs
     /// (see [`stepd_blobs_s3`]).
-    S3(S3Config),
+    ///
+    /// [`S3ConfigInput`], not [`S3Config`] directly: this holds whatever was
+    /// read from the environment, which may be incomplete, and
+    /// [`S3ConfigInput::resolve`] is the one place that turns it into a
+    /// usable `S3Config` or names what is missing.
+    S3(S3ConfigInput),
 }
 
-/// Placeholder used for `S3Config::endpoint` when `STEPD_BLOB_S3_ENDPOINT` is
-/// not set, so an `S3Config` can always be constructed even from an incomplete
-/// environment.
+/// S3 configuration as read from the environment, before completeness
+/// validation.
 ///
-/// `.invalid` is reserved by RFC 2606 to never resolve, which is what lets
-/// [`Config::validate_blob_backend`] recognise "not actually configured"
-/// without threading a separate presence flag through the struct.
-const UNSET_S3_ENDPOINT: &str = "http://unset.invalid";
+/// `endpoint` is `Option<Url>`, not a sentinel URL string. An earlier version
+/// used `"http://unset.invalid"` and compared `Url::as_str()` against it —
+/// WHATWG URL normalisation gives a special-scheme URL an empty path of `/`,
+/// so the parsed sentinel read back as `"http://unset.invalid/"` and the
+/// comparison never matched. `STEPD_BLOB_BACKEND=s3` with no endpoint set
+/// built and served regardless, presigning uploads against a hostname RFC
+/// 2606 guarantees will never resolve — exactly the failure the completeness
+/// check exists to prevent. `Option` makes "not configured" a state the type
+/// carries, not a string that has to survive being re-parsed and compared.
+///
+/// [`Debug`] is implemented by hand, like [`S3Config`]'s, so the secret key
+/// does not reach a log the first time someone prints a `Config`.
+#[derive(Clone)]
+pub struct S3ConfigInput {
+    /// Base URL of the service, if `STEPD_BLOB_S3_ENDPOINT` was set and parsed.
+    pub endpoint: Option<Url>,
+    /// Region name used in the signature.
+    pub region: String,
+    /// Bucket holding the objects.
+    pub bucket: String,
+    /// Access key id.
+    pub access_key: String,
+    /// Secret access key.
+    pub secret_key: String,
+    /// Address the bucket as a path segment rather than a hostname.
+    pub path_style: bool,
+}
+
+impl std::fmt::Debug for S3ConfigInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3ConfigInput")
+            .field("endpoint", &self.endpoint)
+            .field("region", &self.region)
+            .field("bucket", &self.bucket)
+            .field("access_key", &self.access_key)
+            .field("path_style", &self.path_style)
+            .finish_non_exhaustive()
+    }
+}
+
+impl S3ConfigInput {
+    /// Resolve into a usable [`S3Config`], or name every `STEPD_BLOB_S3_*`
+    /// variable that is still missing.
+    ///
+    /// Called twice on the way to a running server: once by
+    /// [`Config::validate_blob_backend`], so an incomplete config fails
+    /// before a database connection is even opened, and again when the
+    /// backend is actually built in `Server::build`. Both calls run the
+    /// identical check; the second is not trusted to have already passed,
+    /// because trusting an invariant across two function calls is how it
+    /// silently stops holding. Public so `stepd doctor` (built as its own
+    /// binary, in `stepd-cli`) can resolve the same value it is diagnosing
+    /// rather than reimplementing this check.
+    pub fn resolve(&self) -> anyhow::Result<S3Config> {
+        let mut missing = Vec::new();
+        if self.endpoint.is_none() {
+            missing.push("STEPD_BLOB_S3_ENDPOINT");
+        }
+        if self.bucket.is_empty() {
+            missing.push("STEPD_BLOB_S3_BUCKET");
+        }
+        if self.access_key.is_empty() {
+            missing.push("STEPD_BLOB_S3_ACCESS_KEY");
+        }
+        if self.secret_key.is_empty() {
+            missing.push("STEPD_BLOB_S3_SECRET_KEY");
+        }
+        anyhow::ensure!(
+            missing.is_empty(),
+            "STEPD_BLOB_BACKEND=s3 but {} unset; a half-configured S3 backend would hand \
+             apps upload URLs pointing at nothing",
+            missing.join(", ")
+        );
+        Ok(S3Config {
+            endpoint: self
+                .endpoint
+                .clone()
+                .expect("checked not-None immediately above"),
+            region: self.region.clone(),
+            bucket: self.bucket.clone(),
+            access_key: self.access_key.clone(),
+            secret_key: self.secret_key.clone(),
+            path_style: self.path_style,
+        })
+    }
+}
+
+/// Default filesystem root for managed blob bytes, absent `STEPD_BLOB_ROOT`
+/// or an explicit override.
+const DEFAULT_BLOB_ROOT: &str = "/var/lib/stepd/blobs";
 
 impl Default for Config {
     fn default() -> Self {
@@ -152,7 +243,7 @@ impl Default for Config {
             default_keys: Vec::new(),
             timer_jitter: chrono::Duration::seconds(60),
             blob_backend: BlobBackendConfig::Filesystem {
-                root: std::path::PathBuf::from("/var/lib/stepd/blobs"),
+                root: std::path::PathBuf::from(DEFAULT_BLOB_ROOT),
             },
             blob_base_url: "http://127.0.0.1:8080".into(),
             // Empty by default, and `validate` refuses to serve blobs without
@@ -222,38 +313,12 @@ impl Config {
             c.timer_jitter = chrono::Duration::seconds(n);
         }
 
-        // `STEPD_BLOB_BACKEND` picks the variant; unset or anything other than
-        // `s3` keeps the filesystem-plus-relay default that makes `stepd dev`
-        // work with no cloud account.
-        if std::env::var("STEPD_BLOB_BACKEND").ok().as_deref() == Some("s3") {
-            c.blob_backend = BlobBackendConfig::S3(S3Config {
-                endpoint: std::env::var("STEPD_BLOB_S3_ENDPOINT")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or_else(|| {
-                        UNSET_S3_ENDPOINT
-                            .parse()
-                            .expect("UNSET_S3_ENDPOINT is a static, valid URL")
-                    }),
-                // Most self-hosted S3-compatible servers ignore the region but
-                // still require it to match what was signed; `us-east-1` is the
-                // one every one of them accepts.
-                region: std::env::var("STEPD_BLOB_S3_REGION")
-                    .unwrap_or_else(|_| "us-east-1".into()),
-                bucket: std::env::var("STEPD_BLOB_S3_BUCKET").unwrap_or_default(),
-                access_key: std::env::var("STEPD_BLOB_S3_ACCESS_KEY").unwrap_or_default(),
-                secret_key: std::env::var("STEPD_BLOB_S3_SECRET_KEY").unwrap_or_default(),
-                // By value, not presence — unlike the egress flags above. Those
-                // are read with `.is_ok()`, which is already a documented trap
-                // (`STEPD_ALLOW_PRIVATE_EGRESS=0` still enables private egress);
-                // a fourth flag next to them reading the opposite way is how an
-                // operator writes `=0` expecting virtual-host addressing off and
-                // signs requests for a bucket-as-hostname no DNS resolves.
-                path_style: env_bool("STEPD_BLOB_S3_PATH_STYLE").unwrap_or(false),
-            });
-        } else if let Ok(v) = std::env::var("STEPD_BLOB_ROOT") {
-            c.blob_backend = BlobBackendConfig::Filesystem { root: v.into() };
-        }
+        // The parsing itself lives in `blob_backend_from`, a pure function of
+        // a lookup closure rather than of `std::env::var` calls sprinkled
+        // through this method — which is what lets it be tested without
+        // mutating the process environment. See its doc comment.
+        c.blob_backend = blob_backend_from(|name| std::env::var(name).ok());
+
         if let Ok(v) = std::env::var("STEPD_BLOB_BASE_URL") {
             c.blob_base_url = v;
         }
@@ -310,29 +375,10 @@ impl Config {
     /// the blob config wrong still fails at startup naming the missing
     /// variable, rather than at the first upload naming a run.
     pub fn validate_blob_backend(&self) -> anyhow::Result<()> {
-        let BlobBackendConfig::S3(s3) = &self.blob_backend else {
-            return Ok(());
-        };
-        let mut missing = Vec::new();
-        if s3.endpoint.as_str() == UNSET_S3_ENDPOINT {
-            missing.push("STEPD_BLOB_S3_ENDPOINT");
+        match &self.blob_backend {
+            BlobBackendConfig::Filesystem { .. } => Ok(()),
+            BlobBackendConfig::S3(s3) => s3.resolve().map(|_| ()),
         }
-        if s3.bucket.is_empty() {
-            missing.push("STEPD_BLOB_S3_BUCKET");
-        }
-        if s3.access_key.is_empty() {
-            missing.push("STEPD_BLOB_S3_ACCESS_KEY");
-        }
-        if s3.secret_key.is_empty() {
-            missing.push("STEPD_BLOB_S3_SECRET_KEY");
-        }
-        anyhow::ensure!(
-            missing.is_empty(),
-            "STEPD_BLOB_BACKEND=s3 but {} unset; a half-configured S3 backend would hand \
-             apps upload URLs pointing at nothing",
-            missing.join(", ")
-        );
-        Ok(())
     }
 
     /// Whether managed blobs are usable on this server.
@@ -350,21 +396,79 @@ fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
     std::env::var(name).ok()?.parse().ok()
 }
 
-/// Parse `name` as a boolean **by value**, not by presence.
+/// Parse a boolean **by value**, not by presence, from an already-read value.
 ///
 /// Unlike the egress flags, which are read with `.is_ok()` — already a
 /// documented trap, since `STEPD_ALLOW_PRIVATE_EGRESS=0` still enables private
 /// egress — this one looks at what was written. A variable next to those three
 /// that reads the opposite way is how an operator writes `=0` expecting
 /// something off and gets it on.
-fn env_bool(name: &str) -> Option<bool> {
-    let v = std::env::var(name).ok()?;
-    match v.trim().to_ascii_lowercase().as_str() {
+///
+/// Takes `Option<String>` rather than a variable name and reading the
+/// environment itself, so it can be exercised — like `blob_backend_from`,
+/// which calls it — without `std::env::set_var`/`remove_var`. `name` is only
+/// used to label the warning if `v` is `Some` but not a recognised spelling.
+fn parse_bool_by_value(name: &str, v: Option<String>) -> Option<bool> {
+    match v?.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
         "0" | "false" | "no" | "off" => Some(false),
         other => {
             tracing::warn!(name, value = other, "not a recognised boolean; ignoring");
             None
+        }
+    }
+}
+
+/// Parse the blob-backend selection from `lookup`.
+///
+/// A pure function of its input, not of `std::env::var` calls sprinkled
+/// through `Config::from_env`, specifically so it is testable without two
+/// tests racing over the same process-global environment variable —
+/// `std::env::set_var`/`remove_var` affect the whole process, this crate pulls
+/// in no `serial_test`, and CLAUDE.md already names "two tests interfering
+/// through shared mutable state" as a recurring failure shape here. Tests call
+/// this directly against a closure over a fixed map; `Config::from_env` is the
+/// only real caller and supplies `std::env::var` at the edge.
+fn blob_backend_from(lookup: impl Fn(&str) -> Option<String>) -> BlobBackendConfig {
+    match lookup("STEPD_BLOB_BACKEND").as_deref() {
+        Some("s3") => BlobBackendConfig::S3(S3ConfigInput {
+            endpoint: lookup("STEPD_BLOB_S3_ENDPOINT").and_then(|v| v.parse().ok()),
+            // Most self-hosted S3-compatible servers ignore the region but
+            // still require it to match what was signed; `us-east-1` is the
+            // one every one of them accepts.
+            region: lookup("STEPD_BLOB_S3_REGION").unwrap_or_else(|| "us-east-1".into()),
+            bucket: lookup("STEPD_BLOB_S3_BUCKET").unwrap_or_default(),
+            access_key: lookup("STEPD_BLOB_S3_ACCESS_KEY").unwrap_or_default(),
+            secret_key: lookup("STEPD_BLOB_S3_SECRET_KEY").unwrap_or_default(),
+            path_style: parse_bool_by_value(
+                "STEPD_BLOB_S3_PATH_STYLE",
+                lookup("STEPD_BLOB_S3_PATH_STYLE"),
+            )
+            .unwrap_or(false),
+        }),
+        other => {
+            // Unset, or explicitly "fs", is the ordinary default. Anything
+            // else ("minio", "aws", a trailing space) is almost certainly a
+            // typo rather than a considered choice: silently keeping the
+            // filesystem default would mean every `STEPD_BLOB_S3_*` variable
+            // the operator set is ignored with no diagnostic at all —
+            // `parse_bool_by_value` above already warns on an unrecognised
+            // value, so this matches that precedent rather than being the one
+            // place in this function that guesses silently.
+            if let Some(v) = other {
+                if v != "fs" {
+                    tracing::warn!(
+                        value = v,
+                        "STEPD_BLOB_BACKEND must be \"fs\" or \"s3\"; using the filesystem \
+                         backend, but every STEPD_BLOB_S3_* variable that was set is being \
+                         ignored"
+                    );
+                }
+            }
+            let root = lookup("STEPD_BLOB_ROOT")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_BLOB_ROOT));
+            BlobBackendConfig::Filesystem { root }
         }
     }
 }
@@ -473,11 +577,14 @@ impl Server {
                             Some(fs as Arc<dyn RelayBytes>),
                         )
                     }
-                    BlobBackendConfig::S3(s3_config) => {
+                    BlobBackendConfig::S3(s3_input) => {
                         // No `RelayBytes`: a backend that presigns has nothing
                         // to relay, which is what keeps §8.3.2's fallback route
                         // unmounted for it (see `stepd_blobs_s3`'s module docs).
-                        let s3 = Arc::new(stepd_blobs_s3::S3Backend::new(s3_config.clone())?);
+                        // `resolve()` re-runs the same check
+                        // `validate_blob_backend` already ran above; see its
+                        // doc comment for why that is not redundant.
+                        let s3 = Arc::new(stepd_blobs_s3::S3Backend::new(s3_input.resolve()?)?);
                         (s3 as Arc<dyn BlobBackend>, None)
                     }
                 };
@@ -689,9 +796,9 @@ mod tests {
         ));
     }
 
-    fn probe_s3_config() -> S3Config {
-        S3Config {
-            endpoint: "http://127.0.0.1:9000".parse().unwrap(),
+    fn probe_s3_config() -> S3ConfigInput {
+        S3ConfigInput {
+            endpoint: Some("http://127.0.0.1:9000".parse().unwrap()),
             region: "us-east-1".into(),
             bucket: "stepd".into(),
             access_key: "probe".into(),
@@ -708,7 +815,7 @@ mod tests {
         // need a database: `Server::build` checks this before it connects.
         let c = Config {
             blob_key: vec![1, 2, 3],
-            blob_backend: BlobBackendConfig::S3(S3Config {
+            blob_backend: BlobBackendConfig::S3(S3ConfigInput {
                 bucket: String::new(),
                 ..probe_s3_config()
             }),
@@ -727,12 +834,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selecting_s3_with_no_endpoint_is_refused_rather_than_silently_accepted() {
+        // The bug this guards: a sentinel URL survived WHATWG normalisation
+        // differently than it was compared against
+        // (`http://unset.invalid` parsed back as `http://unset.invalid/`), so
+        // this branch was previously dead — `STEPD_BLOB_S3_ENDPOINT` unset
+        // built and served regardless, presigning against a hostname RFC 2606
+        // guarantees will never resolve. `endpoint: Option<Url>` removes the
+        // sentinel-comparison class of bug rather than fixing the comparison.
+        let c = Config {
+            blob_key: vec![1, 2, 3],
+            blob_backend: BlobBackendConfig::S3(S3ConfigInput {
+                endpoint: None,
+                ..probe_s3_config()
+            }),
+            ..Default::default()
+        };
+        let err = Server::build(c)
+            .await
+            .err()
+            .expect("an endpointless S3 config must not build");
+        assert!(
+            err.to_string().contains("STEPD_BLOB_S3_ENDPOINT"),
+            "got {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn selecting_s3_with_no_credentials_is_also_refused() {
         // The bucket is not the only identity an upload URL depends on; empty
         // keys are just as much "pointing at nothing" as an empty bucket.
         let c = Config {
             blob_key: vec![1, 2, 3],
-            blob_backend: BlobBackendConfig::S3(S3Config {
+            blob_backend: BlobBackendConfig::S3(S3ConfigInput {
                 access_key: String::new(),
                 secret_key: String::new(),
                 ..probe_s3_config()
@@ -759,19 +893,39 @@ mod tests {
         assert!(c.validate_blob_backend().is_ok());
     }
 
+    // The four tests below exercise `blob_backend_from` directly, against a
+    // closure over a fixed map, rather than `Config::from_env` against
+    // `std::env::set_var`/`remove_var`. Two earlier versions of these tests
+    // raced over the process-global `STEPD_BLOB_BACKEND` variable — no
+    // `serial_test`, no `--test-threads=1` anywhere in this workspace, so
+    // they ran concurrently in one process and could flake in both
+    // directions. This is the shape CLAUDE.md already names: "two tests
+    // interfering through shared mutable state, and nothing in the build
+    // catches the next one." Calling the pure function directly removes the
+    // shared state rather than serialising around it.
+    fn lookup(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
     #[test]
     fn s3_path_style_is_read_by_value_not_by_presence() {
         // The three egress flags are read with `.is_ok()`, where setting one
         // to `0` still turns it on — a documented trap. This flag must not
         // repeat it: `=0` has to mean off.
-        std::env::set_var("STEPD_BLOB_BACKEND", "s3");
-        std::env::set_var("STEPD_BLOB_S3_BUCKET", "stepd");
-        std::env::set_var("STEPD_BLOB_S3_ACCESS_KEY", "probe");
-        std::env::set_var("STEPD_BLOB_S3_SECRET_KEY", "probeprobe");
-
-        std::env::set_var("STEPD_BLOB_S3_PATH_STYLE", "0");
-        let c = Config::from_env();
-        match &c.blob_backend {
+        const BASE: &[(&str, &str)] = &[
+            ("STEPD_BLOB_BACKEND", "s3"),
+            ("STEPD_BLOB_S3_ENDPOINT", "http://127.0.0.1:9000"),
+            ("STEPD_BLOB_S3_BUCKET", "stepd"),
+            ("STEPD_BLOB_S3_ACCESS_KEY", "probe"),
+            ("STEPD_BLOB_S3_SECRET_KEY", "probeprobe"),
+            ("STEPD_BLOB_S3_PATH_STYLE", "0"),
+        ];
+        match blob_backend_from(lookup(BASE)) {
             BlobBackendConfig::S3(s3) => assert!(
                 !s3.path_style,
                 "STEPD_BLOB_S3_PATH_STYLE=0 must mean path_style is off"
@@ -779,33 +933,59 @@ mod tests {
             other => panic!("expected an S3 backend, got {other:?}"),
         }
 
-        std::env::set_var("STEPD_BLOB_S3_PATH_STYLE", "1");
-        let c = Config::from_env();
-        match &c.blob_backend {
+        const ON: &[(&str, &str)] = &[
+            ("STEPD_BLOB_BACKEND", "s3"),
+            ("STEPD_BLOB_S3_ENDPOINT", "http://127.0.0.1:9000"),
+            ("STEPD_BLOB_S3_BUCKET", "stepd"),
+            ("STEPD_BLOB_S3_ACCESS_KEY", "probe"),
+            ("STEPD_BLOB_S3_SECRET_KEY", "probeprobe"),
+            ("STEPD_BLOB_S3_PATH_STYLE", "1"),
+        ];
+        match blob_backend_from(lookup(ON)) {
             BlobBackendConfig::S3(s3) => assert!(
                 s3.path_style,
                 "STEPD_BLOB_S3_PATH_STYLE=1 must mean path_style is on"
             ),
             other => panic!("expected an S3 backend, got {other:?}"),
         }
-
-        std::env::remove_var("STEPD_BLOB_BACKEND");
-        std::env::remove_var("STEPD_BLOB_S3_BUCKET");
-        std::env::remove_var("STEPD_BLOB_S3_ACCESS_KEY");
-        std::env::remove_var("STEPD_BLOB_S3_SECRET_KEY");
-        std::env::remove_var("STEPD_BLOB_S3_PATH_STYLE");
     }
 
     #[test]
-    fn an_unset_blob_backend_env_var_keeps_the_filesystem_default() {
-        // `STEPD_BLOB_BACKEND` unset, or set to anything but `s3`, must not
-        // silently disable the filesystem-plus-relay default that makes
-        // `stepd dev` and CI work with no object store.
-        std::env::remove_var("STEPD_BLOB_BACKEND");
-        let c = Config::from_env();
+    fn an_unset_blob_backend_keeps_the_filesystem_default() {
+        // `STEPD_BLOB_BACKEND` unset, or set to `fs`, must not disable the
+        // filesystem-plus-relay default that makes `stepd dev` and CI work
+        // with no object store.
         assert!(matches!(
-            c.blob_backend,
+            blob_backend_from(lookup(&[])),
             BlobBackendConfig::Filesystem { .. }
         ));
+        assert!(matches!(
+            blob_backend_from(lookup(&[("STEPD_BLOB_BACKEND", "fs")])),
+            BlobBackendConfig::Filesystem { .. }
+        ));
+    }
+
+    #[test]
+    fn an_unrecognised_blob_backend_falls_back_to_the_filesystem_rather_than_hanging() {
+        // "minio", "aws", a trailing space — none of these should silently
+        // drop every STEPD_BLOB_S3_* variable an operator set with no
+        // diagnostic. This asserts only the fallback; the warning itself
+        // needs a tracing subscriber this test binary does not install.
+        assert!(matches!(
+            blob_backend_from(lookup(&[("STEPD_BLOB_BACKEND", "minio")])),
+            BlobBackendConfig::Filesystem { .. }
+        ));
+    }
+
+    #[test]
+    fn blob_root_still_selects_the_filesystem_root() {
+        // An upgrading operator's existing `STEPD_BLOB_ROOT` must keep
+        // selecting the same root it always did.
+        match blob_backend_from(lookup(&[("STEPD_BLOB_ROOT", "/tmp/custom-blobs")])) {
+            BlobBackendConfig::Filesystem { root } => {
+                assert_eq!(root, std::path::PathBuf::from("/tmp/custom-blobs"));
+            }
+            other => panic!("expected filesystem, got {other:?}"),
+        }
     }
 }

@@ -244,20 +244,40 @@ async fn write_content(
 
 /// Turn a `commit_blob` failure into the right response.
 ///
-/// `commit_blob` returns `Error::Config` only for a real mismatch — the store
-/// answered and the bytes it holds do not match what was declared — which is
-/// what §8.3.2 reserves `blob_digest_mismatch` for. Anything else
-/// (`Error::Store`, `Error::Transport`) is the store failing to answer at all:
-/// no checksum in the object's metadata, or a HEAD that never landed. Telling
-/// the app `blob_digest_mismatch` for that says the upload was corrupt when
-/// the truth is the backend could not be asked. A free function so this
-/// mapping is testable without a database or an HTTP request.
+/// Three cases, not two:
+///
+/// - `Error::Config` is returned only for a real mismatch — the store
+///   answered and the bytes it holds do not match what was declared — which
+///   is what §8.3.2 reserves `blob_digest_mismatch` for.
+/// - `Error::Store` with the exact message `"no such blob {id}"` is returned
+///   only when the row is gone: collected after its 24h reservation window,
+///   or an id that was never reserved at all
+///   (`stepd-store-postgres/src/blobs/mod.rs`'s two `.ok_or_else` sites, both
+///   producing this identical string). Not a mismatch — nothing was compared
+///   — and not a backend failure either, since the store answered fine; there
+///   was simply no row. `404 no_such_blob` fits neither of the other codes.
+/// - Everything else. This is honestly two different things `commit_blob`'s
+///   `Error` type cannot distinguish from each other: an object-store failure
+///   (no checksum in the object's metadata, or a HEAD that never landed —
+///   both surfaced by the backend from inside `commit_blob`) and a Postgres
+///   failure on the row read or the final `UPDATE` (both wrapped into
+///   `Error::Store` by `stepd-store-postgres`'s `db()`, indistinguishable at
+///   this layer from the object-store case). Neither is the app's fault and
+///   neither is a mismatch, so both get a gateway failure rather than the app
+///   being told its own upload was corrupt — but the message does not name
+///   "the object store" specifically, since it may not be.
+///
+/// A free function so this mapping is testable without a database or an HTTP
+/// request.
 fn commit_blob_problem(e: stepd_core::Error) -> Problem {
     match e {
         stepd_core::Error::Config(msg) => Problem::bad_request("blob_digest_mismatch", msg),
+        stepd_core::Error::Store(msg) if msg.starts_with("no such blob ") => {
+            Problem::not_found("no_such_blob", msg)
+        }
         other => Problem::bad_gateway(
             "blob_backend_unavailable",
-            format!("could not verify the upload against the blob store: {other}"),
+            format!("could not verify the upload: {other}"),
         ),
     }
 }
@@ -377,10 +397,14 @@ mod tests {
         // The two conditions Task 4 added: no checksum in the object's
         // metadata, or a HEAD that never landed. Neither is the app's fault,
         // and telling it "blob_digest_mismatch" says its upload was corrupt
-        // when the truth is the backend could not be asked.
+        // when the truth is the backend could not be asked. A plain Postgres
+        // failure lands in the same bucket, for the same reason: `db()` also
+        // wraps it as `Error::Store`, and this layer cannot tell the two
+        // apart — see `commit_blob_problem`'s doc comment.
         for e in [
             stepd_core::Error::Store("the object store reports no checksum".into()),
             stepd_core::Error::Transport("HeadObject for blob: connection refused".into()),
+            stepd_core::Error::Store("connection reset by peer".into()),
         ] {
             let p = commit_blob_problem(e);
             assert_eq!(p.status, StatusCode::BAD_GATEWAY, "got code {}", p.code);
@@ -388,7 +412,24 @@ mod tests {
                 p.code, "blob_digest_mismatch",
                 "a backend failure must not read as a claim about the app's bytes"
             );
+            assert_ne!(
+                p.code, "no_such_blob",
+                "a backend failure is not the same claim as an absent row"
+            );
         }
+    }
+
+    #[test]
+    fn a_missing_row_is_not_found_not_a_mismatch_or_a_gateway_failure() {
+        // `commit_blob` returns exactly this message, and only this message,
+        // when the row is gone: collected after its 24h window, or an id
+        // that was never reserved. Neither a mismatch (nothing was compared)
+        // nor a backend failure (the store answered fine; there was simply
+        // no row).
+        let id = uuid::Uuid::nil();
+        let p = commit_blob_problem(stepd_core::Error::Store(format!("no such blob {id}")));
+        assert_eq!(p.status, StatusCode::NOT_FOUND);
+        assert_eq!(p.code, "no_such_blob");
     }
 
     #[test]
