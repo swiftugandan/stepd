@@ -146,7 +146,14 @@ impl Capability {
 /// in a step result, and a walk that only checked the top level would hand back
 /// references the app cannot dereference, from payload shapes that are perfectly
 /// ordinary.
-pub fn attach_read_urls(caps: &Capability, value: &mut serde_json::Value, ttl: Duration) {
+///
+/// A `read_url` failure on one reference does not fail the whole attempt: the
+/// `url` key is simply left off that reference and the failure is logged. The
+/// SDK already reports a missing read URL precisely (`BlobError::NoReadUrl`),
+/// and failing the entire attempt because one of forty references could not be
+/// signed would trade that precise, local error for a broad one that tells the
+/// app nothing about which reference or why.
+pub fn attach_read_urls(backend: &dyn BlobBackend, value: &mut serde_json::Value, ttl: Duration) {
     match value {
         serde_json::Value::Object(map) => {
             if let Some(serde_json::Value::Object(blob)) = map.get_mut("$blob") {
@@ -156,18 +163,28 @@ pub fn attach_read_urls(caps: &Capability, value: &mut serde_json::Value, ttl: D
                     .and_then(|s| s.parse::<Uuid>().ok());
                 let size = blob.get("size").and_then(|v| v.as_i64());
                 if let (Some(id), Some(size)) = (id, size) {
-                    let (url, _) = caps.url(id, "read", size, ttl);
-                    blob.insert("url".into(), serde_json::Value::String(url));
+                    match backend.read_url(id, size, ttl) {
+                        Ok(url) => {
+                            blob.insert("url".into(), serde_json::Value::String(url));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                blob = %id, error = %e,
+                                "failed to mint a read url for this blob reference; \
+                                 leaving it off, the SDK reports it as a missing read url"
+                            );
+                        }
+                    }
                 }
                 return;
             }
             for (_, v) in map.iter_mut() {
-                attach_read_urls(caps, v, ttl);
+                attach_read_urls(backend, v, ttl);
             }
         }
         serde_json::Value::Array(items) => {
             for v in items {
-                attach_read_urls(caps, v, ttl);
+                attach_read_urls(backend, v, ttl);
             }
         }
         _ => {}
@@ -190,12 +207,12 @@ impl PostgresBlobStore {
     ) -> Self {
         let caps = Capability::new(base_url, key);
         let fs = Arc::new(FilesystemBackend::new(root.into(), caps.clone()));
-        let mut store = Self::with_backend(pool, fs.clone(), caps);
-        store.relay = Some(fs as Arc<dyn RelayBytes>);
-        store
+        Self::with_backend_and_relay(pool, fs.clone(), Some(fs as Arc<dyn RelayBytes>), caps)
     }
 
-    /// Build a store whose bytes live wherever `backend` puts them.
+    /// Build a store whose bytes live wherever `backend` puts them, with no
+    /// relay: the backend must presign, or the transfer endpoints will refuse
+    /// every request (Task 3 stops mounting them for a backend like this).
     ///
     /// `caps` still verifies the capabilities on the server's transfer
     /// endpoints, independent of which backend is minting them.
@@ -204,10 +221,29 @@ impl PostgresBlobStore {
         backend: Arc<dyn BlobBackend>,
         caps: Capability,
     ) -> Self {
+        Self::with_backend_and_relay(pool, backend, None, caps)
+    }
+
+    /// Build a store from a backend the caller already constructed, sharing
+    /// its relay capability (if any) too.
+    ///
+    /// Exists so a caller that hands the same backend `Arc` to more than one
+    /// place — the server wires the identical `Arc` into both this store and
+    /// [`crate::PostgresStore::with_blob_backend`] — can also carry the relay
+    /// through, which [`PostgresBlobStore::with_backend`] always sets to
+    /// `None`. Building two backends from one configuration instead would work
+    /// today and diverge the moment one took a different code path: reads
+    /// minted against one bucket while uploads land in another, silently.
+    pub fn with_backend_and_relay(
+        pool: sqlx::PgPool,
+        backend: Arc<dyn BlobBackend>,
+        relay: Option<Arc<dyn RelayBytes>>,
+        caps: Capability,
+    ) -> Self {
         Self {
             pool,
             backend,
-            relay: None,
+            relay,
             caps,
             max_size: DEFAULT_MAX_SIZE,
         }
@@ -581,6 +617,47 @@ mod tests {
         assert_eq!(
             sha256_hex(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    use stepd_core::traits::{StoredObject, UploadTarget};
+
+    /// A backend that mints an unmistakable URL, so a test can prove which minter ran.
+    struct StubBackend;
+
+    #[async_trait]
+    impl BlobBackend for StubBackend {
+        async fn upload_target(&self, _: Uuid, _: &BlobSpec, _: Duration) -> Result<UploadTarget> {
+            unimplemented!("not exercised by the read path")
+        }
+        fn read_url(&self, id: Uuid, size: i64, _: Duration) -> Result<String> {
+            Ok(format!("stub://{id}/{size}"))
+        }
+        async fn stored(&self, _: Uuid) -> Result<Option<StoredObject>> {
+            Ok(None)
+        }
+        async fn delete(&self, _: Uuid) -> Result<()> {
+            Ok(())
+        }
+        fn can_presign(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn read_urls_are_minted_by_the_backend_not_by_the_relay_capability() {
+        // The bug this guards: an S3 backend is configured, and attempts keep
+        // receiving relay URLs because the journal walk still holds a Capability.
+        // Every byte then goes through the server exactly as before, silently.
+        let id = Uuid::now_v7();
+        let mut v = serde_json::json!({
+            "receipts": [ { "file": { "$blob": { "id": id, "size": 7, "sha256": "ab" } } } ]
+        });
+        attach_read_urls(&StubBackend, &mut v, Duration::seconds(60));
+        assert_eq!(
+            v["receipts"][0]["file"]["$blob"]["url"],
+            serde_json::json!(format!("stub://{id}/7")),
+            "the backend's URL must reach the attempt"
         );
     }
 }

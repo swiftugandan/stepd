@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use axum::routing::get;
 use axum::Router;
+use stepd_core::traits::{BlobBackend, RelayBytes};
 use stepd_core::{DispatchConfig, Dispatcher, Housekeeper, KeeperConfig};
 use stepd_expr_cel::CelEngine;
 use stepd_store_postgres::PostgresStore;
@@ -308,30 +309,39 @@ impl Server {
     pub async fn build(config: Config) -> anyhow::Result<Self> {
         let mut store =
             PostgresStore::connect(&config.database_url, config.max_connections).await?;
-        if config.blobs_enabled() {
-            // The store mints read URLs for `$blob` values on their way to an
-            // attempt. It needs only the signing key and base URL to do it, not
-            // a filesystem root — which is why the capability minter is separate
-            // from the blob store in the first place.
-            store = store.with_blob_capability(stepd_store_postgres::Capability::new(
-                config.blob_base_url.clone(),
-                config.blob_key.clone(),
-            ));
-        }
         // Managed blobs are optional. A server with no blob signing key still
         // runs every other path; it simply refuses the two transfer endpoints,
         // which is honest and is what the doctor reports.
-        let blobs = config.blobs_enabled().then(|| {
-            Arc::new(
-                stepd_store_postgres::PostgresBlobStore::new(
+        //
+        // The backend is built exactly once here and the same `Arc` is handed
+        // to both the store (which mints read URLs for `$blob` values on their
+        // way to an attempt) and the blob index below. Building two backends
+        // from the same configuration would work today and diverge the moment
+        // one took a different code path — the store minting reads against one
+        // bucket while uploads land in another is exactly the silent-corruption
+        // shape this project keeps finding.
+        let blobs = if config.blobs_enabled() {
+            let caps = stepd_store_postgres::Capability::new(
+                config.blob_base_url.clone(),
+                config.blob_key.clone(),
+            );
+            let fs = Arc::new(stepd_store_postgres::blobs::FilesystemBackend::new(
+                config.blob_root.clone(),
+                caps.clone(),
+            ));
+            store = store.with_blob_backend(fs.clone() as Arc<dyn BlobBackend>);
+            Some(Arc::new(
+                stepd_store_postgres::PostgresBlobStore::with_backend_and_relay(
                     store.pool().clone(),
-                    config.blob_root.clone(),
-                    config.blob_base_url.clone(),
-                    config.blob_key.clone(),
+                    fs.clone() as Arc<dyn BlobBackend>,
+                    Some(fs as Arc<dyn RelayBytes>),
+                    caps,
                 )
                 .with_max_size(config.blob_max_size),
-            )
-        });
+            ))
+        } else {
+            None
+        };
         if let Some(b) = &blobs {
             store = store.with_blob_collector(b.clone());
         }
