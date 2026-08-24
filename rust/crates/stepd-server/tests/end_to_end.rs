@@ -373,25 +373,32 @@ async fn fixture_with_presigning_backend() -> Option<PresigningFixture> {
     })
 }
 
-/// Drive the namespace until the run finishes or the budget runs out.
-async fn drive_until_done(f: &Fixture, run: Uuid, max_ticks: u32) -> String {
+/// Drive `namespace` on `server` until `run` finishes or the budget runs out.
+///
+/// Shared by every fixture in this file that needs a drive loop: it takes
+/// only `Server` and a namespace, not a fixture type, so `Fixture` and
+/// `S3Fixture` — which otherwise share no common type — can both call it
+/// without either duplicating the loop or forcing the other to gain fields it
+/// does not use.
+async fn drive(server: &Server, namespace: &str, run: Uuid, max_ticks: u32) -> String {
     use stepd_core::traits::StateStore;
     for _ in 0..max_ticks {
-        f.server
-            .dispatcher
-            .tick_namespace(&f.namespace)
-            .await
-            .unwrap();
-        f.server.housekeeper.tick().await;
-        if let Some(s) = f.server.store_status(run).await {
+        server.dispatcher.tick_namespace(namespace).await.unwrap();
+        server.housekeeper.tick().await;
+        if let Some(s) = server.store_status(run).await {
             if s.is_terminal() {
                 return format!("{s:?}").to_lowercase();
             }
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let s = f.server.state.store.run_status(run).await.unwrap();
+    let s = server.state.store.run_status(run).await.unwrap();
     panic!("run {run} did not finish; last status {s:?}");
+}
+
+/// Drive the namespace until the run finishes or the budget runs out.
+async fn drive_until_done(f: &Fixture, run: Uuid, max_ticks: u32) -> String {
+    drive(&f.server, &f.namespace, run, max_ticks).await
 }
 
 /// Convenience for the status poll above.
@@ -1430,9 +1437,12 @@ impl AsyncWrite for CountingStream {
 /// sharing one counter: the total bytes, in both directions, that have ever
 /// crossed this server's own client-facing socket.
 ///
-/// Only the API listener is ever wrapped in this file, never the app's: the
-/// control plane BR-19 talks about is this server, and that is the boundary
-/// the no-bytes test needs a count of.
+/// Only the API listener is ever wrapped in this file, never the app's or the
+/// dispatcher's outbound leg to it — both are also control plane, and neither
+/// is counted here. What stands in for that leg is the test's separate
+/// assertion on the run's output: `Blob` carries no bytes, only a size and a
+/// digest, so an app step that tried to return content inline could not
+/// produce the shape the test checks for at all, counter or no counter.
 struct CountingListener {
     inner: tokio::net::TcpListener,
     bytes: Arc<AtomicU64>,
@@ -1569,7 +1579,10 @@ struct S3Fixture {
 }
 
 async fn fixture_with_s3(label: &str) -> Option<S3Fixture> {
-    let database_url = std::env::var("STEPD_TEST_DATABASE_URL").ok()?;
+    let Ok(database_url) = std::env::var("STEPD_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: set STEPD_TEST_DATABASE_URL to run the end-to-end tests");
+        return None;
+    };
     let Some(s3) = s3_test_config() else {
         eprintln!(
             "SKIPPED: set STEPD_TEST_S3_ENDPOINT to run the S3 blob-backend \
@@ -1671,28 +1684,9 @@ async fn fixture_with_s3(label: &str) -> Option<S3Fixture> {
     })
 }
 
-/// Same loop as `drive_until_done`, retyped for `S3Fixture` rather than
-/// generalised: the original is called from every test in this file, and
-/// reshaping it to take a trait for the sake of one more caller would touch
-/// every existing call site to save fifteen duplicated lines here.
+/// Drive an `S3Fixture`'s run to completion via the shared `drive` loop.
 async fn drive_s3_until_done(f: &S3Fixture, run: Uuid, max_ticks: u32) -> String {
-    use stepd_core::traits::StateStore;
-    for _ in 0..max_ticks {
-        f.server
-            .dispatcher
-            .tick_namespace(&f.namespace)
-            .await
-            .unwrap();
-        f.server.housekeeper.tick().await;
-        if let Some(s) = f.server.store_status(run).await {
-            if s.is_terminal() {
-                return format!("{s:?}").to_lowercase();
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let s = f.server.state.store.run_status(run).await.unwrap();
-    panic!("run {run} did not finish; last status {s:?}");
+    drive(&f.server, &f.namespace, run, max_ticks).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1812,25 +1806,39 @@ async fn no_object_bytes_reach_the_server_on_the_s3_path() {
     // reservation call the app's own step made through the SDK, and the
     // whole drive loop, the total bytes that ever crossed this server's own
     // client-facing socket — both directions, everything `CountingListener`
-    // saw — stayed far below the payload's size. The upload itself,
-    // `S3_TEST_PAYLOAD.len()` bytes, went straight from the app's step to the
-    // object store; had it gone through this server instead, this counter
-    // would have moved by roughly that many bytes, not by the few kilobytes
-    // of JSON control traffic it actually carries.
+    // saw — stayed in the noise. Actual control-plane traffic here is a few
+    // kilobytes of JSON; the ceiling below is `CONTROL_PLANE_TRAFFIC_CEILING`
+    // (32 KiB), comfortably above that and comfortably below
+    // `S3_TEST_PAYLOAD.len()` (256 KiB), so a regression that routed the
+    // payload — or any large fraction of it — through this socket instead of
+    // straight to the object store would clear it.
     //
-    // What this does not catch: a `commit_blob` that downloaded the object
+    // What this does NOT catch: a `commit_blob` that downloaded the object
     // from the object store to hash it would add no bytes here at all — that
     // traffic runs between this server process and the object store, never
-    // touching the socket this counter watches. `stepd-blobs-s3`'s own
-    // `a_committed_object_reports_its_digest_without_transferring_it` is what
-    // covers that path, and the CI lane runs both suites together for
-    // exactly this reason.
+    // touching the socket this counter watches. Today that path is closed
+    // structurally rather than by a test: `commit_blob`
+    // (`stepd-store-postgres/src/blobs/mod.rs`) only downloads and hashes
+    // when `BlobBackend::stored` answers `sha256: None`, and `S3Backend::stored`
+    // never does — it errors instead of returning `None` when the object
+    // store reports no checksum. Nothing here or in `stepd-blobs-s3` asserts
+    // that a *regressed* `S3Backend::stored` returning `None` would still be
+    // caught; `stepd-blobs-s3`'s own
+    // `a_committed_object_reports_its_digest_without_transferring_it` only
+    // checks that `stored` reports the right digest today, and its own doc
+    // comment says a backend that downloaded to hash it would pass that
+    // assertion too. As of this test, neither suite runs in CI — both exist
+    // and pass locally with `STEPD_TEST_DATABASE_URL` and `STEPD_TEST_S3_*`
+    // set, but the CI lane that was meant to run them was reverted pending
+    // separate review of how it starts an S3-compatible service, so BR-19 is
+    // not yet proven by anything CI runs.
     let total = f.server_bytes.load(Ordering::SeqCst);
+    const CONTROL_PLANE_TRAFFIC_CEILING: usize = 32 * 1024;
     assert!(
-        (total as usize) < S3_TEST_PAYLOAD.len() / 2,
-        "control-plane traffic totalled {total} bytes, which is not far \
-         enough below the {}-byte payload to rule out the payload itself \
-         having crossed this socket",
-        S3_TEST_PAYLOAD.len()
+        (total as usize) < CONTROL_PLANE_TRAFFIC_CEILING,
+        "control-plane traffic totalled {total} bytes, over the {}-byte \
+         ceiling; that is not explainable by JSON control chatter alone and \
+         is consistent with the payload itself having crossed this socket",
+        CONTROL_PLANE_TRAFFIC_CEILING
     );
 }
