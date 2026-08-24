@@ -9,7 +9,7 @@ use crate::{Error, Result};
 use chrono::{Duration, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
-use stepd_proto::{ErrorBody, Op, RunId};
+use stepd_proto::{ErrorBody, Event, Op, RunId};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
@@ -82,6 +82,27 @@ pub struct Dispatcher<S, Q, T> {
     stats: Mutex<DispatchStats>,
     /// Round-robin cursor across namespaces, so a noisy tenant cannot starve a quiet one.
     cursor: Mutex<usize>,
+    /// Managed blobs, when the deployment has them (protocol §8.3).
+    ///
+    /// `None` on a deployment with no blob signing key, and then the whole
+    /// verification path is skipped — no walk, no calls, no warning. A
+    /// [`BlobStore`] is one of this crate's own interfaces, so holding one names
+    /// no concrete backend.
+    blobs: Option<Arc<dyn BlobStore>>,
+}
+
+/// What verifying an envelope's blob references found.
+enum BlobCheck {
+    /// Nothing to verify, or everything verified.
+    Verified,
+    /// The blob store could not answer. Retrying could still succeed, so this
+    /// must not fail the run: a blip at the object store permanently failing
+    /// runs is the same quiet outage as treating a retryable app error as
+    /// terminal.
+    Unavailable(ErrorBody),
+    /// The blob store answered, and the reference must not be committed. §8.3.2
+    /// requires the ops be discarded and the failure be non-retryable.
+    Refused(ErrorBody),
 }
 
 /// Resolves a function to the app endpoint that hosts it.
@@ -114,7 +135,17 @@ where
             breakers: Mutex::new(HashMap::new()),
             stats: Mutex::new(DispatchStats::default()),
             cursor: Mutex::new(0),
+            blobs: None,
         }
+    }
+
+    /// Verify managed-blob references against `blobs` before committing them.
+    ///
+    /// Optional because managed blobs are: a deployment with no blob signing key
+    /// leaves this unset and every other path behaves exactly as it did.
+    pub fn with_blob_store(mut self, blobs: Arc<dyn BlobStore>) -> Self {
+        self.blobs = Some(blobs);
+        self
     }
 
     /// Snapshot of the counters.
@@ -254,21 +285,60 @@ where
             return Ok(false);
         }
 
-        let ops = self.apply_timer_jitter(response.ops);
-        match self
-            .store
-            .commit(
-                lease.run_id,
-                lease.fence,
-                OpCommit {
-                    ops,
-                    emit: response.emit,
-                },
-            )
-            .await?
-        {
+        // Protocol §8.3.2: the server verifies a managed blob's size and digest
+        // before it becomes readable, and "the commit" a mismatch fails is this
+        // one — the op commit that puts the reference into the journal. On a
+        // backend that presigns there is no other moment: the bytes went
+        // straight from the app to the object store, so a reference nobody
+        // verifies here stays `reserved`, is refused by `presign_read`, and has
+        // its bytes collected once the reservation window elapses.
+        let refused = match self.verify_blobs(&response.ops, &response.emit).await {
+            BlobCheck::Verified => None,
+            BlobCheck::Unavailable(error) => {
+                debug!(run = %lease.run_id, "could not verify a blob reference; backing off");
+                self.handle_failure(lease, error).await?;
+                return Ok(false);
+            }
+            BlobCheck::Refused(error) => Some(error),
+        };
+
+        let commit = match &refused {
+            // "the ops are discarded": the app's envelope is replaced by a
+            // single non-retryable error op. The terminal write then still
+            // happens inside the store's own commit transaction rather than in
+            // a second place that also knows how to fail a run — and still
+            // under the fence, so a superseded attempt cannot fail a run
+            // another worker has already taken over.
+            Some(error) => OpCommit {
+                ops: vec![Op::Error {
+                    retryable: false,
+                    step: None,
+                    error: error.clone(),
+                }],
+                emit: vec![],
+            },
+            None => OpCommit {
+                ops: self.apply_timer_jitter(response.ops),
+                emit: response.emit,
+            },
+        };
+
+        match self.store.commit(lease.run_id, lease.fence, commit).await? {
             CommitOutcome::Committed => {
-                self.stats.lock().await.committed += 1;
+                match refused {
+                    // Counted the way the store's own rejections are: the run is
+                    // failed and its ops are gone, which is not a commit of the
+                    // app's work in any sense the counter is used for.
+                    Some(error) => {
+                        warn!(
+                            run = %lease.run_id,
+                            code = error.code.as_deref().unwrap_or("unknown"),
+                            "blob reference refused; ops discarded and the run failed non-retryably"
+                        );
+                        self.stats.lock().await.rejected += 1;
+                    }
+                    None => self.stats.lock().await.committed += 1,
+                }
                 Ok(true)
             }
             CommitOutcome::StaleFence => {
@@ -296,6 +366,75 @@ where
                 Ok(true)
             }
         }
+    }
+
+    /// Make every managed blob this envelope references readable, or say why not.
+    ///
+    /// `BlobStore::commit_blob` is the verification: it compares the stored
+    /// object against the size and digest the app declared at reservation and,
+    /// only if they agree, moves the blob to `committed`. Calling it here is what
+    /// gives a presigning backend the commit step it otherwise never gets, and
+    /// what stops a reference reaching the journal before anything checked it —
+    /// `docs/adr/010-payload-tiering.md` rejected checking on first read for
+    /// exactly that reason.
+    ///
+    /// A blob that is already committed — which on the relay path is every blob
+    /// the dispatcher ever sees, because the transfer endpoint commits before the
+    /// ops carrying the reference are returned — is a no-op inside `commit_blob`,
+    /// not an error and not a second read of the bytes.
+    ///
+    /// References are verified one at a time. Each is a round trip on an object
+    /// storage backend, so a fan-out would be faster for a single step result
+    /// carrying many; it would also need a bound (a result with forty references
+    /// otherwise opens forty concurrent requests and forty pool connections) and
+    /// a rule for which of several simultaneous failures decides the run's fate.
+    /// The dispatcher's concurrency is across runs, where it is already bounded
+    /// by `batch`.
+    async fn verify_blobs(&self, ops: &[Op], emit: &[Event]) -> BlobCheck {
+        // No managed blobs configured: no walk, no calls, nothing to say.
+        let Some(blobs) = &self.blobs else {
+            return BlobCheck::Verified;
+        };
+
+        // §8.3.4: "every step result, run input and emitted event that contains
+        // a `$blob`". The run inputs an envelope can carry are `invoke` and
+        // `continue_as_new`, both ops.
+        let mut ids = Vec::new();
+        for op in ops {
+            crate::blobs::op_blob_ids(op, &mut ids);
+        }
+        for event in emit {
+            crate::blobs::event_blob_ids(event, &mut ids);
+        }
+        if ids.is_empty() {
+            return BlobCheck::Verified;
+        }
+        ids.sort_unstable();
+        ids.dedup();
+
+        for id in ids {
+            let Err(e) = blobs.commit_blob(id).await else {
+                continue;
+            };
+            // `Error::is_retryable` already draws this line, and draws it the
+            // same way the server's transfer endpoint does: a store that could
+            // not answer is a gateway failure, a store that answered "these
+            // bytes are not what you declared" or "there is no such blob" is
+            // the app's, and no number of redeliveries changes it.
+            if e.is_retryable() {
+                return BlobCheck::Unavailable(ErrorBody::coded(
+                    "blob_backend_unavailable",
+                    format!("could not verify blob {id}: {e}"),
+                ));
+            }
+            let (code, message) = match &e {
+                Error::Config(msg) => ("blob_digest_mismatch", msg.clone()),
+                Error::NotFound(msg) => ("no_such_blob", msg.clone()),
+                other => ("blob_not_verified", other.to_string()),
+            };
+            return BlobCheck::Refused(ErrorBody::coded(code, message));
+        }
+        BlobCheck::Verified
     }
 
     /// Spread sleep wake-ups across a window.

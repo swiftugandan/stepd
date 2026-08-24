@@ -123,10 +123,17 @@ verification, URL minting and deletion (§8.5).
   `a_capability_is_bound_to_one_blob_and_one_size` (substituting the id or the declared size
   fails, "or a write URL uploads more than was reserved").
 * Same file: `an_expired_capability_is_refused_even_with_a_valid_mac`,
-  `a_minted_url_verifies_against_its_own_signature`,
-  `blob_references_are_found_wherever_they_are_nested` (a `$blob` inside an array inside an
-  object is found — what the reference count depends on), and
+  `a_minted_url_verifies_against_its_own_signature`, and
   `blob_paths_shard_and_stay_under_the_root` with `is_within`, against path traversal.
+* `rust/crates/stepd-core/src/blobs.rs`, where the reference walk now lives so the engine and
+  the store share one: `blob_references_are_found_wherever_they_are_nested` (a `$blob` inside
+  an array inside an object is found — what the reference count depends on).
+* `rust/crates/stepd-core/tests/engine.rs`, for verify-at-op-commit rather than on first read:
+  `a_blob_reference_that_fails_verification_fails_the_run_and_records_no_ops`,
+  `a_run_with_no_blob_references_commits_the_same_with_or_without_a_blob_store`, and
+  `an_already_committed_blob_reference_commits_normally`, whose store-side counterpart is
+  `committing_an_already_committed_blob_does_not_look_at_the_object_again` in
+  `rust/crates/stepd-store-postgres/tests/live.rs`.
 * Same module: `reserve` scopes the digest lookup by namespace and carries the comment on the
   probing attack; `commit_blob` checks size and digest before `state='committed'`, returning
   `blob_digest_mismatch`; `collect` deletes bytes before rows.

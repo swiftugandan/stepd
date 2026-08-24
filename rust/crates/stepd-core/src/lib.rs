@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod blobs;
 pub mod cron;
 pub mod dispatcher;
 pub mod error;
@@ -19,6 +20,7 @@ pub mod policy;
 pub mod testing;
 pub mod traits;
 
+pub use blobs::{blob_ids, event_blob_ids, op_blob_ids};
 pub use cron::{
     decide as cron_decide, CatchUp, CatchUpPolicy, CronDecision, CronError, Schedule, SkipReason,
 };

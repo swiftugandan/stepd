@@ -867,3 +867,115 @@ async fn a_delete_failure_during_collection_leaves_that_row_and_still_collects_t
          deleted blob's row may be gone"
     );
 }
+
+/// A `BlobBackend` that counts every `stored` call and answers `Ok(None)`.
+///
+/// `None` is what a backend says when it holds no object for an id, and
+/// `commit_blob` turns that into `Error::NotFound`. So a test using this
+/// backend fails twice over if the already-committed short circuit is missing:
+/// the count is non-zero, and the call errors.
+///
+/// The counter is a field, not a `static`: two tests running this struct must
+/// not see each other's calls.
+struct CountingBackend {
+    stored_calls: std::sync::atomic::AtomicU64,
+}
+
+#[async_trait::async_trait]
+impl BlobBackend for CountingBackend {
+    async fn upload_target(
+        &self,
+        _id: Uuid,
+        _spec: &BlobSpec,
+        _ttl: Duration,
+    ) -> stepd_core::Result<UploadTarget> {
+        unimplemented!("commit_blob never mints an upload target")
+    }
+
+    fn read_url(&self, _id: Uuid, _size: i64, _ttl: Duration) -> stepd_core::Result<String> {
+        unimplemented!("commit_blob never mints a read url")
+    }
+
+    async fn stored(&self, _id: Uuid) -> stepd_core::Result<Option<StoredObject>> {
+        self.stored_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(None)
+    }
+
+    async fn delete(&self, _id: Uuid) -> stepd_core::Result<()> {
+        unimplemented!("commit_blob never deletes")
+    }
+
+    fn can_presign(&self) -> bool {
+        true
+    }
+
+    fn name(&self) -> &'static str {
+        "counting-stub"
+    }
+}
+
+/// The relay path's regression guard, against the real store.
+///
+/// Two callers commit a blob now: the transfer endpoint, as soon as it has
+/// relayed the bytes, and — since protocol §8.3.2 makes the op commit the point
+/// at which a `$blob` becomes readable — the dispatcher, for every reference in
+/// an envelope it is about to record. On a backend that cannot presign the
+/// second always follows the first, and it recurs on every replay of the step.
+///
+/// So committing an already-committed blob has to return its reference without
+/// going back to the object at all. Re-reading would be a `HeadObject` per
+/// reference per attempt on object storage, and a full re-read plus rehash on
+/// the filesystem backend; erroring would break the relay path outright.
+#[tokio::test]
+async fn committing_an_already_committed_blob_does_not_look_at_the_object_again() {
+    let s = db_test!(store);
+    let ns = namespace(&s, "blobrecommit").await;
+
+    let id = Uuid::now_v7();
+    let digest = vec![7u8; 32];
+    sqlx::query(
+        "INSERT INTO blobs (id, ns, size, sha256, content_type, state, committed_at)
+         VALUES ($1, $2, 24, $3, 'text/plain', 'committed', now())",
+    )
+    .bind(id)
+    .bind(&ns)
+    .bind(&digest)
+    .execute(s.pool())
+    .await
+    .expect("seed a committed blob row directly");
+
+    let backend = Arc::new(CountingBackend {
+        stored_calls: std::sync::atomic::AtomicU64::new(0),
+    });
+    let caps = Capability::new("http://localhost:8080", b"k".to_vec());
+    let blobs = PostgresBlobStore::with_backend(s.pool().clone(), backend.clone(), caps);
+
+    let reference = blobs
+        .commit_blob(id)
+        .await
+        .expect("committing an already-committed blob is a no-op, not an error");
+
+    assert_eq!(reference.id, id);
+    assert_eq!(reference.size, 24);
+    assert_eq!(reference.sha256, hex::encode(&digest));
+    assert_eq!(reference.content_type.as_deref(), Some("text/plain"));
+    assert!(
+        reference.url.is_none(),
+        "§8.3.1: `url` is minted per attempt on read, never returned here"
+    );
+    assert_eq!(
+        backend
+            .stored_calls
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "an already-committed blob must not send the store back to the object"
+    );
+
+    let state: String = sqlx::query_scalar("SELECT state::text FROM blobs WHERE id = $1")
+        .bind(id)
+        .fetch_one(s.pool())
+        .await
+        .expect("read the state back");
+    assert_eq!(state, "committed");
+}
