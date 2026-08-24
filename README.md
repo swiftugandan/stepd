@@ -283,6 +283,48 @@ Managed blobs need `STEPD_BLOB_SIGNING_KEY`, `STEPD_BLOB_ROOT` and
 say why: a capability signed with a default key verifies for anyone who guesses
 it, and the failure would be silent, so there is no default.
 
+### Running with Docker
+
+`Dockerfile` and `compose.yaml` at the root stand up Postgres, apply the
+migrations and serve, with the console on `:8080`.
+
+```bash
+cp .env.example .env      # set POSTGRES_PASSWORD and STEPD_SIGNING_KEY
+docker compose up -d --build
+docker compose --profile bootstrap run --rm bootstrap   # a namespace and a token
+docker compose --profile ops run --rm doctor
+```
+
+`bootstrap` prints the console URL with a token in it, once — only the hash is
+stored. Verified end to end on 2026-08-24: image built, migrations applied,
+`/v1/health` answering, the console served, `doctor` at 13 checks and 0
+critical, and SIGTERM draining both loops in under a second.
+
+Four things about the file are load-bearing rather than stylistic:
+
+* **Migrations are their own one-shot service, not `serve --migrate`.** It is a
+  release step that must run against a database whose server will not start,
+  and it means replicas of `serve` do not race to apply the same migration.
+  `serve` waits on `service_completed_successfully`.
+* **The egress flags are passed as bare names.** `Config::from_env` reads them
+  with `env::var(..).is_ok()` — presence, not value — so
+  `STEPD_ALLOW_PRIVATE_EGRESS=0` *enables* private egress. The bare form makes
+  an unset variable arrive absent instead of empty. An app on the compose
+  network has an RFC 1918 address, so it needs this set; the policy fails
+  closed and metadata addresses stay denied regardless.
+* **No pgbouncer.** [#15](https://github.com/swiftugandan/stepd/issues/15) —
+  sqlx's migrator takes a session-scoped advisory lock that never releases
+  through a transaction-mode pooler. Putting one in front of this would
+  reproduce that hang on the first `up`. `doctor`'s pooler check is what tells
+  you whether the connection you have is safe.
+* **`stop_grace_period` exceeds the attempt timeout.** SIGTERM makes the server
+  drain in-flight attempts; killing it mid-drain abandons leases that then have
+  to expire, so every deploy would delay the runs it interrupted.
+
+The build image is `rust:1-bookworm`, matching what CI resolves
+`@stable` to — **not** the `rust-version = "1.85"` the workspace declares,
+which no longer builds ([#21](https://github.com/swiftugandan/stepd/issues/21)).
+
 ### Writing a workflow
 
 ```rust

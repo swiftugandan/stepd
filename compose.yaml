@@ -1,0 +1,200 @@
+# stepd — server, console and Postgres.
+#
+#   cp .env.example .env      # then set the two keys; there are no defaults
+#   docker compose up -d --build
+#   docker compose --profile bootstrap run --rm bootstrap
+#
+# The last line prints a console URL with a token in it. Tokens are stored as
+# hashes, so it is shown once and cannot be recovered afterwards.
+
+name: stepd
+
+services:
+  # --------------------------------------------------------------- database
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-stepd}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-stepd}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # -U and -d, not the bare form: pg_isready defaults to the OS user, which
+      # answers "ready" from a server that has not yet created this database.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stepd} -d ${POSTGRES_DB:-stepd}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    # The engine's serialization points are row-level locks held inside one
+    # transaction, so the defaults are the constraint, not the workload.
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+
+  # --------------------------------------------------------------- migrations
+  # A release step, not a flag on serve. `stepd migrate` must be runnable
+  # against a database whose server will not start, and running it once here
+  # means N replicas of `serve` do not race to apply the same migration.
+  migrate:
+    build:
+      context: .
+      target: runtime
+    image: stepd:local
+    restart: "no"
+    command: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - STEPD_DATABASE_URL=postgres://${POSTGRES_USER:-stepd}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-stepd}
+      - STEPD_LOG=${STEPD_LOG:-info}
+      - STEPD_LOG_JSON
+
+  # --------------------------------------------------------------- server
+  stepd:
+    build:
+      context: .
+      target: runtime
+    image: stepd:local
+    restart: unless-stopped
+    command: ["serve"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "${STEPD_PORT:-8080}:8080"
+    environment:
+      - STEPD_DATABASE_URL=postgres://${POSTGRES_USER:-stepd}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-stepd}
+      - STEPD_BIND=0.0.0.0:8080
+
+      # `serve` refuses to start without this rather than sending every attempt
+      # unsigned, which a conforming app rejects (protocol §9).
+      - STEPD_SIGNING_KEY=${STEPD_SIGNING_KEY:?set STEPD_SIGNING_KEY in .env; serve will not start without one}
+      # Set during a rotation so both keys verify and the change is not a flag
+      # day. Absent when not rotating — see the note on empty values below.
+      - STEPD_SIGNING_KEY_PREVIOUS
+
+      # Managed blobs. Empty disables the two transfer endpoints (501) with a
+      # warning; it never falls back to a default key, because a capability
+      # signed with a guessable key verifies for whoever guessed it.
+      - STEPD_BLOB_SIGNING_KEY=${STEPD_BLOB_SIGNING_KEY:-}
+      - STEPD_BLOB_ROOT=/var/lib/stepd/blobs
+      # The URL apps are handed for upload and download. Correct value depends
+      # on where your app runs: http://localhost:8080 for an app on the host,
+      # http://stepd:8080 for one on this compose network.
+      - STEPD_BLOB_BASE_URL=${STEPD_BLOB_BASE_URL:-http://localhost:8080}
+      - STEPD_BLOB_MAX_SIZE=${STEPD_BLOB_MAX_SIZE:-104857600}
+
+      # ---- egress. These three are read by presence, not by value: setting
+      # STEPD_ALLOW_PRIVATE_EGRESS=0 ENABLES private egress. That is why they
+      # are bare names here — an unset variable is passed through as absent,
+      # whereas `NAME=${NAME:-}` would set it to the empty string and turn the
+      # policy on. Uncomment the export in .env to allow them.
+      #
+      # An app on this compose network has an RFC 1918 address, so it needs
+      # STEPD_ALLOW_PRIVATE_EGRESS=1. Cloud metadata stays denied regardless.
+      - STEPD_ALLOW_PRIVATE_EGRESS
+      - STEPD_ALLOW_LOOPBACK_EGRESS
+      - STEPD_EGRESS_ALLOWLIST
+
+      # ---- dispatch. The lease must outlast the attempt: equal values mean a
+      # slow-but-healthy app is reclaimed mid-attempt and its step re-executed.
+      # The server warns at startup if this inequality is broken.
+      - STEPD_ATTEMPT_TIMEOUT_SECONDS=${STEPD_ATTEMPT_TIMEOUT_SECONDS:-60}
+      - STEPD_LEASE_SECONDS=${STEPD_LEASE_SECONDS:-150}
+      - STEPD_BATCH=${STEPD_BATCH:-16}
+      - STEPD_MAX_CONNECTIONS=${STEPD_MAX_CONNECTIONS:-16}
+      - STEPD_IDLE_POLL_MS=${STEPD_IDLE_POLL_MS:-250}
+      - STEPD_TIMER_JITTER_SECONDS=${STEPD_TIMER_JITTER_SECONDS:-60}
+
+      - STEPD_LOG=${STEPD_LOG:-info}
+      - STEPD_LOG_JSON
+    volumes:
+      - blobs:/var/lib/stepd/blobs
+    healthcheck:
+      # /v1/health is the one unauthenticated route, and it executes a query —
+      # so it fails when the database is gone rather than when the process is.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    # Longer than STEPD_ATTEMPT_TIMEOUT_SECONDS. SIGTERM makes the server drain
+    # in-flight attempts; killing it mid-drain abandons leases that then have to
+    # expire, so every deploy would delay the runs it interrupted.
+    stop_grace_period: 90s
+
+  # --------------------------------------------------------------- bootstrap
+  # One-shot, profile-gated: creates a namespace and mints an admin token.
+  #   docker compose --profile bootstrap run --rm bootstrap
+  # Both operations are idempotent; each token call mints an additional token.
+  bootstrap:
+    build:
+      context: .
+      target: runtime
+    image: stepd:local
+    profiles: ["bootstrap"]
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        stepd namespace "$${STEPD_NAMESPACE}" &&
+        stepd token --namespace "$${STEPD_NAMESPACE}" --role admin --name bootstrap
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      - STEPD_DATABASE_URL=postgres://${POSTGRES_USER:-stepd}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-stepd}
+      - STEPD_NAMESPACE=${STEPD_NAMESPACE:-default}
+      - STEPD_LOG=${STEPD_LOG:-warn}
+
+  # --------------------------------------------------------------- diagnostics
+  #   docker compose --profile ops run --rm doctor
+  # Thirteen checks against the live database; non-zero exit on anything
+  # critical. Runnable when the server will not start, which is when it matters.
+  doctor:
+    build:
+      context: .
+      target: runtime
+    image: stepd:local
+    profiles: ["ops"]
+    restart: "no"
+    command: ["doctor"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - STEPD_DATABASE_URL=postgres://${POSTGRES_USER:-stepd}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-stepd}
+      - STEPD_LOG=${STEPD_LOG:-info}
+
+  # --------------------------------------------------------------- your app
+  # The execution model is push: the server calls your application's endpoint,
+  # so the app must be reachable from the stepd container and both sides must
+  # hold the same STEPD_SIGNING_KEY.
+  #
+  # app:
+  #   build: ./your-app
+  #   restart: unless-stopped
+  #   environment:
+  #     - STEPD_SIGNING_KEY=${STEPD_SIGNING_KEY}
+  #   expose: ["9944"]
+  #
+  # Then register it, with STEPD_ALLOW_PRIVATE_EGRESS set on the stepd service:
+  #   curl -X PUT http://localhost:8080/v1/apps \
+  #     -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  #     -d '{"url":"http://app:9944", ...}'
+
+volumes:
+  pgdata:
+  # Bytes behind every $blob reference in a live run's journal. Losing this
+  # volume fails those runs on their next replay, hours later, with a missing
+  # object — so it is a named volume, not a container-local path.
+  blobs:
