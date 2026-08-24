@@ -127,7 +127,12 @@ pub enum BlobBackendConfig {
     /// read from the environment, which may be incomplete, and
     /// [`S3ConfigInput::resolve`] is the one place that turns it into a
     /// usable `S3Config` or names what is missing.
-    S3(S3ConfigInput),
+    ///
+    /// Boxed because it is far larger than `Filesystem` — two `EndpointInput`s
+    /// and five `String`s against one `PathBuf` — and an unboxed enum is the
+    /// size of its largest variant everywhere it appears, including in the
+    /// filesystem deployments that are the default.
+    S3(Box<S3ConfigInput>),
 }
 
 /// What `STEPD_BLOB_S3_ENDPOINT` was, in the three states it can be in.
@@ -174,6 +179,13 @@ pub enum EndpointInput {
 pub struct S3ConfigInput {
     /// Base URL of the service, as `STEPD_BLOB_S3_ENDPOINT` left it.
     pub endpoint: EndpointInput,
+    /// Base URL apps are handed, as `STEPD_BLOB_S3_PUBLIC_ENDPOINT` left it.
+    ///
+    /// [`EndpointInput`] rather than `Option<Url>` for the same reason
+    /// `endpoint` uses it — a value that will not parse must be quoted back,
+    /// not reported as unset. Unlike `endpoint`, [`EndpointInput::Unset`] is
+    /// legitimate here and means "sign against the endpoint".
+    pub public_endpoint: EndpointInput,
     /// Region name used in the signature.
     pub region: String,
     /// Bucket holding the objects.
@@ -190,6 +202,7 @@ impl std::fmt::Debug for S3ConfigInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3ConfigInput")
             .field("endpoint", &self.endpoint)
+            .field("public_endpoint", &self.public_endpoint)
             .field("region", &self.region)
             .field("bucket", &self.bucket)
             .field("access_key", &self.access_key)
@@ -233,6 +246,23 @@ impl S3ConfigInput {
                 None
             }
         };
+        // Absent is legitimate here, unlike `endpoint`: it means "apps reach
+        // the store at the same address this process does", which is the
+        // ordinary single-network case. Only a value that will not parse is a
+        // problem — and it is one, rather than something to drop silently,
+        // because dropping it hands every app URLs pointing at the endpoint
+        // the operator was explicitly trying to override.
+        let public_endpoint = match &self.public_endpoint {
+            EndpointInput::Unset => None,
+            EndpointInput::Url(u) => Some(u.clone()),
+            EndpointInput::Unparsed(raw) => {
+                problems.push(format!(
+                    "STEPD_BLOB_S3_PUBLIC_ENDPOINT is set to {raw:?}, which is not a URL \
+                     — it needs a scheme and a host, as in https://blobs.example.com"
+                ));
+                None
+            }
+        };
         if self.bucket.is_empty() {
             problems.push("STEPD_BLOB_S3_BUCKET is unset".into());
         }
@@ -250,6 +280,7 @@ impl S3ConfigInput {
         );
         Ok(S3Config {
             endpoint: endpoint.expect("a problem was recorded above for every other case"),
+            public_endpoint,
             region: self.region.clone(),
             bucket: self.bucket.clone(),
             access_key: self.access_key.clone(),
@@ -488,12 +519,23 @@ fn blob_backend_from(lookup: impl Fn(&str) -> Option<String>) -> BlobBackendConf
     // it halfway" so much as refusing a spelling an operator plainly meant.
     let backend = lookup("STEPD_BLOB_BACKEND").map(|v| v.trim().to_ascii_lowercase());
     match backend.as_deref() {
-        Some("s3") => BlobBackendConfig::S3(S3ConfigInput {
+        Some("s3") => BlobBackendConfig::S3(Box::new(S3ConfigInput {
             // Not `.and_then(|v| v.parse().ok())`: that maps a value that
             // will not parse to the same thing as no value, and `resolve`
             // then tells an operator staring at the variable that it is
             // unset. `EndpointInput` keeps the two apart.
             endpoint: match lookup("STEPD_BLOB_S3_ENDPOINT") {
+                None => EndpointInput::Unset,
+                Some(raw) => match raw.parse::<Url>() {
+                    Ok(url) => EndpointInput::Url(url),
+                    Err(_) => EndpointInput::Unparsed(raw),
+                },
+            },
+            // Optional, and `EndpointInput` for the same reason as above: a
+            // value that will not parse has to be quoted back rather than
+            // reported as unset. `Unset` here is a legitimate answer, not an
+            // incomplete config — see `resolve`.
+            public_endpoint: match lookup("STEPD_BLOB_S3_PUBLIC_ENDPOINT") {
                 None => EndpointInput::Unset,
                 Some(raw) => match raw.parse::<Url>() {
                     Ok(url) => EndpointInput::Url(url),
@@ -512,7 +554,7 @@ fn blob_backend_from(lookup: impl Fn(&str) -> Option<String>) -> BlobBackendConf
                 lookup("STEPD_BLOB_S3_PATH_STYLE"),
             )
             .unwrap_or(false),
-        }),
+        })),
         other => {
             // Unset, or explicitly "fs", is the ordinary default. Anything
             // else ("minio", "aws", "s3://…") is almost certainly a typo
@@ -895,6 +937,7 @@ mod tests {
     fn probe_s3_config() -> S3ConfigInput {
         S3ConfigInput {
             endpoint: EndpointInput::Url("http://127.0.0.1:9000".parse().unwrap()),
+            public_endpoint: EndpointInput::Unset,
             region: "us-east-1".into(),
             bucket: "stepd".into(),
             access_key: "probe".into(),
@@ -911,10 +954,10 @@ mod tests {
         // need a database: `Server::build` checks this before it connects.
         let c = Config {
             blob_key: vec![1, 2, 3],
-            blob_backend: BlobBackendConfig::S3(S3ConfigInput {
+            blob_backend: BlobBackendConfig::S3(Box::new(S3ConfigInput {
                 bucket: String::new(),
                 ..probe_s3_config()
-            }),
+            })),
             ..Default::default()
         };
         // `Server` implements no `Debug`, so `expect_err` (which would print
@@ -940,10 +983,10 @@ mod tests {
         // sentinel-comparison class of bug rather than fixing the comparison.
         let c = Config {
             blob_key: vec![1, 2, 3],
-            blob_backend: BlobBackendConfig::S3(S3ConfigInput {
+            blob_backend: BlobBackendConfig::S3(Box::new(S3ConfigInput {
                 endpoint: EndpointInput::Unset,
                 ..probe_s3_config()
-            }),
+            })),
             ..Default::default()
         };
         let err = Server::build(c)
@@ -962,11 +1005,11 @@ mod tests {
         // keys are just as much "pointing at nothing" as an empty bucket.
         let c = Config {
             blob_key: vec![1, 2, 3],
-            blob_backend: BlobBackendConfig::S3(S3ConfigInput {
+            blob_backend: BlobBackendConfig::S3(Box::new(S3ConfigInput {
                 access_key: String::new(),
                 secret_key: String::new(),
                 ..probe_s3_config()
-            }),
+            })),
             ..Default::default()
         };
         let err = Server::build(c)
@@ -983,10 +1026,62 @@ mod tests {
     #[test]
     fn a_fully_configured_s3_backend_validates() {
         let c = Config {
-            blob_backend: BlobBackendConfig::S3(probe_s3_config()),
+            blob_backend: BlobBackendConfig::S3(Box::new(probe_s3_config())),
             ..Default::default()
         };
         assert!(c.validate_blob_backend().is_ok());
+    }
+
+    #[test]
+    fn a_public_endpoint_that_is_set_but_unusable_is_refused_by_name() {
+        // Same reasoning as `an_endpoint_that_is_set_but_unusable_is_not_
+        // reported_as_unset`: silently dropping an unparseable value hands
+        // apps URLs pointing at the wrong host, and reporting it as unset
+        // sends the operator to look at a variable that is plainly right
+        // there. Unlike the endpoint, though, absent is legitimate here — so
+        // this must refuse the unparseable case without refusing the unset
+        // one, which the test below covers.
+        let c = S3ConfigInput {
+            public_endpoint: EndpointInput::Unparsed("blobs.example.com".into()),
+            ..probe_s3_config()
+        };
+        let err = c
+            .resolve()
+            .expect_err("an unparseable public endpoint must not resolve");
+        assert!(
+            err.to_string().contains("STEPD_BLOB_S3_PUBLIC_ENDPOINT")
+                && err.to_string().contains("blobs.example.com"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn an_unset_public_endpoint_resolves_to_no_override() {
+        // The whole point of the field is that not setting it leaves today's
+        // behaviour exactly as it was.
+        let c = probe_s3_config()
+            .resolve()
+            .expect("the probe config is complete");
+        assert_eq!(c.public_endpoint, None);
+    }
+
+    #[test]
+    fn a_public_endpoint_reaches_the_config_from_the_environment() {
+        let cfg = blob_backend_from(lookup(&[
+            ("STEPD_BLOB_BACKEND", "s3"),
+            ("STEPD_BLOB_S3_ENDPOINT", "http://minio:9000"),
+            ("STEPD_BLOB_S3_PUBLIC_ENDPOINT", "https://blobs.example.com"),
+            ("STEPD_BLOB_S3_BUCKET", "stepd"),
+            ("STEPD_BLOB_S3_ACCESS_KEY", "probe"),
+            ("STEPD_BLOB_S3_SECRET_KEY", "probeprobe"),
+        ]));
+        match cfg {
+            BlobBackendConfig::S3(s) => assert_eq!(
+                s.public_endpoint,
+                EndpointInput::Url("https://blobs.example.com".parse().unwrap())
+            ),
+            other => panic!("expected the S3 backend, got {other:?}"),
+        }
     }
 
     // The four tests below exercise `blob_backend_from` directly, against a
@@ -1102,10 +1197,10 @@ mod tests {
         let c = Config {
             database_url: "postgres://postgres@127.0.0.1:1/stepd_no_such_server".into(),
             blob_key: Vec::new(),
-            blob_backend: BlobBackendConfig::S3(S3ConfigInput {
+            blob_backend: BlobBackendConfig::S3(Box::new(S3ConfigInput {
                 bucket: String::new(),
                 ..probe_s3_config()
-            }),
+            })),
             ..Default::default()
         };
         assert!(!c.blobs_enabled(), "no signing key means no managed blobs");

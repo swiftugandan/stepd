@@ -105,7 +105,28 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 #[derive(Clone)]
 pub struct S3Config {
     /// Base URL of the service, e.g. `https://s3.eu-west-1.amazonaws.com`.
+    ///
+    /// The address *this process* reaches the store at, for the metadata
+    /// requests it makes itself. See [`Self::public_endpoint`] for the one
+    /// applications are handed.
     pub endpoint: Url,
+    /// Base URL to sign *app-facing* URLs against, when applications reach the
+    /// object store at a different address than this process does.
+    ///
+    /// `None` signs against [`Self::endpoint`], which is what a deployment
+    /// where both sides share one address wants and is the behaviour this
+    /// backend had before the field existed.
+    ///
+    /// The split exists because one address cannot serve both vantage points.
+    /// The server calls the store directly for `HeadObject` and
+    /// `DeleteObject`, so it needs an address reachable from wherever the
+    /// server runs — a cluster-internal service name, typically. Every
+    /// presigned URL is handed to an application that may be nowhere near that
+    /// network, and carries whatever host it was signed with, because SigV4
+    /// signs the host. Before this field, `minio:9000` worked for a sibling
+    /// container and not a host app, and `localhost:9000` the reverse, with no
+    /// value that worked for both.
+    pub public_endpoint: Option<Url>,
     /// Region name used in the signature. Non-AWS servers usually ignore the
     /// value but still require it to match what was signed.
     pub region: String,
@@ -127,6 +148,10 @@ impl std::fmt::Debug for S3Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3Config")
             .field("endpoint", &self.endpoint)
+            // An address, not a credential — and the one an operator debugging
+            // a signature mismatch most needs to see, because it is the host
+            // SigV4 signed.
+            .field("public_endpoint", &self.public_endpoint)
             .field("region", &self.region)
             .field("bucket", &self.bucket)
             .field("access_key", &self.access_key)
@@ -144,7 +169,11 @@ impl std::fmt::Debug for S3Config {
 /// secret in its own.
 #[derive(Debug, Clone)]
 pub struct S3Backend {
-    bucket: Bucket,
+    /// Addressed by this process: `HeadObject`, `DeleteObject`, `check_bucket`.
+    internal: Bucket,
+    /// Addressed by applications: every presigned URL this backend mints.
+    /// Identical to [`Self::internal`] unless `public_endpoint` was set.
+    presign: Bucket,
     credentials: Credentials,
     http: reqwest::Client,
 }
@@ -174,15 +203,30 @@ impl S3Backend {
         } else {
             UrlStyle::VirtualHost
         };
-        let bucket = Bucket::new(config.endpoint, style, config.bucket, config.region)
-            .map_err(|e| Error::Config(format!("blob store endpoint is unusable: {e}")))?;
+        let internal = Bucket::new(
+            config.endpoint,
+            style,
+            config.bucket.clone(),
+            config.region.clone(),
+        )
+        .map_err(|e| Error::Config(format!("blob store endpoint is unusable: {e}")))?;
+        // Cloned rather than re-derived when there is no override, so the two
+        // are the same value by construction and cannot drift into signing
+        // against subtly different bases.
+        let presign = match config.public_endpoint {
+            None => internal.clone(),
+            Some(url) => Bucket::new(url, style, config.bucket, config.region).map_err(|e| {
+                Error::Config(format!("blob store public endpoint is unusable: {e}"))
+            })?,
+        };
         let http = reqwest::Client::builder()
             .connect_timeout(connect)
             .timeout(request)
             .build()
             .map_err(|e| Error::Transport(format!("building the blob store client: {e}")))?;
         Ok(Self {
-            bucket,
+            internal,
+            presign,
             credentials: Credentials::new(config.access_key, config.secret_key),
             http,
         })
@@ -267,7 +311,7 @@ impl BlobBackend for S3Backend {
         let length = spec.size.to_string();
         let key = Self::key(id);
 
-        let mut action = PutObject::new(&self.bucket, Some(&self.credentials), &key);
+        let mut action = PutObject::new(&self.presign, Some(&self.credentials), &key);
         let headers = action.headers_mut();
         headers.insert("x-amz-checksum-sha256", checksum.clone());
         headers.insert("content-length", length.clone());
@@ -307,7 +351,7 @@ impl BlobBackend for S3Backend {
     /// no network.
     fn read_url(&self, id: Uuid, _size: i64, ttl: Duration) -> Result<String> {
         let key = Self::key(id);
-        let action = GetObject::new(&self.bucket, Some(&self.credentials), &key);
+        let action = GetObject::new(&self.presign, Some(&self.credentials), &key);
         Ok(action.sign(presign_ttl(ttl)?).to_string())
     }
 
@@ -322,7 +366,7 @@ impl BlobBackend for S3Backend {
     /// for: the condition is a property of the server, not a moment in it.
     async fn stored(&self, id: Uuid) -> Result<Option<StoredObject>> {
         let key = Self::key(id);
-        let mut action = HeadObject::new(&self.bucket, Some(&self.credentials), &key);
+        let mut action = HeadObject::new(&self.internal, Some(&self.credentials), &key);
         action
             .headers_mut()
             .insert("x-amz-checksum-mode", "ENABLED");
@@ -393,7 +437,7 @@ impl BlobBackend for S3Backend {
     /// Delete the object. Already gone is success, so collection is idempotent.
     async fn delete(&self, id: Uuid) -> Result<()> {
         let key = Self::key(id);
-        let action = DeleteObject::new(&self.bucket, Some(&self.credentials), &key);
+        let action = DeleteObject::new(&self.internal, Some(&self.credentials), &key);
         let url = action.sign(INTERNAL_TTL);
 
         let res = self
@@ -522,7 +566,7 @@ impl S3Backend {
     /// everything else `doctor` checks.
     pub async fn check_bucket(&self) -> BucketCheck {
         let key = Self::key(DOCTOR_PROBE_ID);
-        let mut action = HeadObject::new(&self.bucket, Some(&self.credentials), &key);
+        let mut action = HeadObject::new(&self.internal, Some(&self.credentials), &key);
         action
             .headers_mut()
             .insert("x-amz-checksum-mode", "ENABLED");
@@ -553,6 +597,7 @@ mod tests {
     fn backend() -> S3Backend {
         S3Backend::new(S3Config {
             endpoint: "http://127.0.0.1:9000".parse().unwrap(),
+            public_endpoint: None,
             region: "us-east-1".into(),
             bucket: "stepd".into(),
             access_key: "probe".into(),
@@ -645,6 +690,7 @@ mod tests {
         // logs, where nothing rotates it and nothing knows it is there.
         let cfg = S3Config {
             endpoint: "http://127.0.0.1:9000".parse().unwrap(),
+            public_endpoint: None,
             region: "us-east-1".into(),
             bucket: "stepd".into(),
             access_key: "probe".into(),
@@ -676,6 +722,7 @@ mod tests {
         // to unwrap.
         let b = S3Backend::new(S3Config {
             endpoint: "http://127.0.0.1:1".parse().unwrap(),
+            public_endpoint: None,
             region: "us-east-1".into(),
             bucket: "stepd".into(),
             access_key: "probe".into(),
@@ -723,6 +770,7 @@ mod tests {
         let backend = S3Backend::with_timeouts(
             S3Config {
                 endpoint: format!("http://{addr}").parse().expect("a url"),
+                public_endpoint: None,
                 region: "us-east-1".into(),
                 bucket: "stepd".into(),
                 access_key: "probe".into(),
@@ -759,5 +807,95 @@ mod tests {
         assert!(b
             .read_url(Uuid::nil(), 5, chrono::Duration::seconds(-1))
             .is_err());
+    }
+
+    /// A config whose two endpoints differ, so a test can tell which one signed.
+    fn split_endpoint_config() -> S3Config {
+        S3Config {
+            endpoint: "http://minio:9000".parse().unwrap(),
+            public_endpoint: Some("https://blobs.example.com".parse().unwrap()),
+            region: "us-east-1".into(),
+            bucket: "stepd".into(),
+            access_key: "probe".into(),
+            secret_key: "probeprobe".into(),
+            path_style: true,
+        }
+    }
+
+    #[test]
+    fn a_read_url_is_signed_against_the_public_endpoint_when_one_is_set() {
+        let b = S3Backend::new(split_endpoint_config()).expect("a complete config builds");
+        let url = b
+            .read_url(Uuid::nil(), 0, Duration::seconds(60))
+            .expect("a positive ttl signs");
+        assert!(
+            url.starts_with("https://blobs.example.com/"),
+            "an app-facing URL must carry the address apps can reach; got {url}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_upload_target_is_signed_against_the_public_endpoint_when_one_is_set() {
+        let b = S3Backend::new(split_endpoint_config()).expect("a complete config builds");
+        let spec = BlobSpec {
+            size: 5,
+            sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".into(),
+            content_type: None,
+            filename: None,
+        };
+        let t = b
+            .upload_target(Uuid::nil(), &spec, Duration::seconds(60))
+            .await
+            .expect("a complete spec signs");
+        assert!(
+            t.url.starts_with("https://blobs.example.com/"),
+            "got {}",
+            t.url
+        );
+    }
+
+    #[test]
+    fn no_public_endpoint_signs_against_the_only_endpoint_there_is() {
+        // The default must be byte-for-byte today's behaviour: an operator who
+        // never sets the new variable must not get a different URL than before.
+        let cfg = S3Config {
+            public_endpoint: None,
+            ..split_endpoint_config()
+        };
+        let b = S3Backend::new(cfg).expect("a complete config builds");
+        let url = b
+            .read_url(Uuid::nil(), 0, Duration::seconds(60))
+            .expect("a positive ttl signs");
+        assert!(url.starts_with("http://minio:9000/"), "got {url}");
+    }
+
+    #[tokio::test]
+    async fn this_process_calls_the_endpoint_even_when_apps_are_sent_elsewhere() {
+        // The one wrong answer in this change that compiles cleanly and passes
+        // every other test: pointing `stored` at the presigning bucket. It
+        // would only ever fail against a deployment where the two addresses
+        // differ, which is the deployment this field exists for.
+        //
+        // Nothing listens on either port. `internal` is 127.0.0.1:1, which
+        // refuses immediately; `presign` is a hostname that does not resolve.
+        // Both fail, but they fail differently, and the error text says which
+        // one was dialled.
+        let b = S3Backend::new(S3Config {
+            endpoint: "http://127.0.0.1:1".parse().unwrap(),
+            public_endpoint: Some("https://blobs.invalid".parse().unwrap()),
+            ..split_endpoint_config()
+        })
+        .expect("a complete config builds");
+
+        let err = b
+            .stored(Uuid::nil())
+            .await
+            .expect_err("nothing is listening, so this cannot succeed");
+        let text = err.to_string();
+        assert!(
+            !text.contains("blobs.invalid"),
+            "`stored` must dial the endpoint this process reaches, not the one \
+             apps are handed; got {text}"
+        );
     }
 }

@@ -1525,6 +1525,9 @@ fn s3_test_config() -> Option<stepd_blobs_s3::S3Config> {
     let var = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.into());
     Some(stepd_blobs_s3::S3Config {
         endpoint: endpoint.parse().expect("STEPD_TEST_S3_ENDPOINT is a URL"),
+        // One address for both vantage points, which is what this test's own
+        // harness is: the server and the "app" are the same process here.
+        public_endpoint: None,
         region: var("STEPD_TEST_S3_REGION", "us-east-1"),
         bucket: var("STEPD_TEST_S3_BUCKET", "stepd"),
         access_key: var("STEPD_TEST_S3_ACCESS_KEY", "probe"),
@@ -1603,14 +1606,20 @@ async fn fixture_with_s3(label: &str) -> Option<S3Fixture> {
     let mut config = Config::from_env();
     config.database_url = database_url;
     config.blob_key = SIGNING_KEY.to_vec();
-    config.blob_backend = BlobBackendConfig::S3(stepd_server::S3ConfigInput {
+    config.blob_backend = BlobBackendConfig::S3(Box::new(stepd_server::S3ConfigInput {
         endpoint: stepd_server::EndpointInput::Url(s3.endpoint.clone()),
+        // Mirrors `s3_test_config`: one address serves both sides here,
+        // because the server and the app under test are one process.
+        public_endpoint: match &s3.public_endpoint {
+            Some(u) => stepd_server::EndpointInput::Url(u.clone()),
+            None => stepd_server::EndpointInput::Unset,
+        },
         region: s3.region.clone(),
         bucket: s3.bucket.clone(),
         access_key: s3.access_key.clone(),
         secret_key: s3.secret_key.clone(),
         path_style: s3.path_style,
-    });
+    }));
     config.blob_base_url = base.clone();
     config.egress = EgressPolicy::development();
     config.default_keys = vec![SIGNING_KEY.to_vec()];
