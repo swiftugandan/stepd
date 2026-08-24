@@ -57,9 +57,7 @@ use uuid::Uuid;
 
 mod blobs;
 mod cron;
-pub use blobs::{
-    attach_read_urls, blob_ids, blob_path, is_within, sha256_hex, Capability, PostgresBlobStore,
-};
+pub use blobs::{attach_read_urls, blob_ids, sha256_hex, Capability, PostgresBlobStore};
 
 /// Translate a database failure into an engine error.
 pub(crate) fn db(e: sqlx::Error) -> Error {

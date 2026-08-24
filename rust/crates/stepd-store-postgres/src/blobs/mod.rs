@@ -6,6 +6,12 @@
 //! URL minting on read, and deletion on collection. This module does exactly
 //! those three things and nothing else.
 //!
+//! Where the bytes live and who mints the transfer URLs is a
+//! [`stepd_core::traits::BlobBackend`]; this module owns only the index —
+//! the row, the per-namespace dedupe, the references recorded by trigger — so
+//! a second backend (S3, say) is a new implementation of that trait, not a
+//! second implementation of this one.
+//!
 //! ## Why the URLs are signed rather than session-authenticated
 //!
 //! An upload URL is handed to an app that may not hold a console token, and is
@@ -24,23 +30,35 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
-use std::path::{Path, PathBuf};
-use stepd_core::traits::{BlobSpec, BlobStore, Reservation};
+use std::path::PathBuf;
+use std::sync::Arc;
+use stepd_core::traits::{BlobBackend, BlobSpec, BlobStore, Reservation};
 use stepd_core::{Error, Result};
 use stepd_proto::BlobRef;
 use uuid::Uuid;
 
 use crate::db;
 
-/// Blob index in Postgres, bytes on a filesystem root.
+mod filesystem;
+pub use filesystem::FilesystemBackend;
+
+/// Blob index in Postgres; bytes and transfer URLs come from a [`BlobBackend`].
 ///
-/// The filesystem backend is what makes `stepd dev` work with no cloud account
-/// and what CI uses; an S3-backed implementation of the same trait is a drop-in
-/// replacement, because nothing above this module knows where bytes live.
+/// [`PostgresBlobStore::new`] builds a [`FilesystemBackend`], which is what
+/// makes `stepd dev` work with no cloud account and what CI uses. Nothing in
+/// this struct's `BlobStore` methods knows that, though — they only ever call
+/// through the trait, which is what makes another backend a drop-in swap.
 #[derive(Clone)]
 pub struct PostgresBlobStore {
     pool: sqlx::PgPool,
-    root: PathBuf,
+    /// Where bytes live and who mints transfer URLs.
+    backend: Arc<dyn BlobBackend>,
+    /// Set only when `backend` also relays bytes through this process — today,
+    /// always, since [`FilesystemBackend`] is the only backend and cannot
+    /// presign. The server's transfer endpoints and `commit_blob`'s
+    /// no-digest-from-metadata fallback use it; a presigning backend has no
+    /// equivalent, and Task 3 stops mounting those endpoints for one.
+    relay: Option<Arc<FilesystemBackend>>,
     /// Mints and checks the transfer capabilities.
     caps: Capability,
     /// Ceiling on a single managed blob (protocol §8.2).
@@ -152,29 +170,42 @@ pub fn attach_read_urls(caps: &Capability, value: &mut serde_json::Value, ttl: D
     }
 }
 
-/// Where a blob's bytes live under `root`.
-///
-/// Sharded by the first bytes of the id so a large namespace does not produce a
-/// single directory with millions of entries, which several filesystems handle
-/// badly and every `ls` handles worse.
-pub fn blob_path(root: &Path, id: Uuid) -> PathBuf {
-    let s = id.simple().to_string();
-    root.join(&s[0..2]).join(&s[2..4]).join(s)
-}
+/// Ceiling on a single managed blob (protocol §8.2), for stores built with
+/// [`PostgresBlobStore::new`] or [`PostgresBlobStore::with_backend`] that do not
+/// override it with [`PostgresBlobStore::with_max_size`].
+const DEFAULT_MAX_SIZE: i64 = 100 * 1024 * 1024;
 
 impl PostgresBlobStore {
-    /// Build a store rooted at `root`, minting URLs under `base_url`.
+    /// Build a store rooted at `root`, minting URLs under `base_url`, with bytes
+    /// on the local filesystem.
     pub fn new(
         pool: sqlx::PgPool,
         root: impl Into<PathBuf>,
         base_url: impl Into<String>,
         key: Vec<u8>,
     ) -> Self {
+        let caps = Capability::new(base_url, key);
+        let fs = Arc::new(FilesystemBackend::new(root.into(), caps.clone()));
+        let mut store = Self::with_backend(pool, fs.clone(), caps);
+        store.relay = Some(fs);
+        store
+    }
+
+    /// Build a store whose bytes live wherever `backend` puts them.
+    ///
+    /// `caps` still verifies the capabilities on the server's transfer
+    /// endpoints, independent of which backend is minting them.
+    pub fn with_backend(
+        pool: sqlx::PgPool,
+        backend: Arc<dyn BlobBackend>,
+        caps: Capability,
+    ) -> Self {
         Self {
             pool,
-            root: root.into(),
-            caps: Capability::new(base_url, key),
-            max_size: 100 * 1024 * 1024,
+            backend,
+            relay: None,
+            caps,
+            max_size: DEFAULT_MAX_SIZE,
         }
     }
 
@@ -191,38 +222,29 @@ impl PostgresBlobStore {
 
     /// Store bytes for a reserved blob. Called by the server's transfer endpoint
     /// after it has verified the capability.
+    ///
+    /// Only meaningful when the backend relays bytes through this process; see
+    /// `relay`.
     pub async fn put_bytes(&self, id: Uuid, bytes: &[u8]) -> Result<()> {
-        let path = blob_path(&self.root, id);
-        if let Some(dir) = path.parent() {
-            tokio::fs::create_dir_all(dir)
-                .await
-                .map_err(|e| Error::Store(e.to_string()))?;
+        match &self.relay {
+            Some(fs) => fs.put_bytes(id, bytes).await,
+            None => Err(Error::Store(
+                "this blob store's backend does not relay bytes through the server".into(),
+            )),
         }
-        // Write to a temporary name and rename into place, so a torn write never
-        // presents itself as a complete blob to a concurrent reader.
-        let tmp = path.with_extension("partial");
-        tokio::fs::write(&tmp, bytes)
-            .await
-            .map_err(|e| Error::Store(e.to_string()))?;
-        tokio::fs::rename(&tmp, &path)
-            .await
-            .map_err(|e| Error::Store(e.to_string()))?;
-        Ok(())
     }
 
     /// Read a committed blob, optionally a byte range (protocol §8.3.3).
+    ///
+    /// Only meaningful when the backend relays bytes through this process; see
+    /// `relay`.
     pub async fn get_bytes(&self, id: Uuid, range: Option<(u64, u64)>) -> Result<Vec<u8>> {
-        let bytes = tokio::fs::read(blob_path(&self.root, id))
-            .await
-            .map_err(|e| Error::Store(e.to_string()))?;
-        Ok(match range {
-            Some((from, to)) => {
-                let from = (from as usize).min(bytes.len());
-                let to = ((to as usize) + 1).min(bytes.len());
-                bytes[from..to.max(from)].to_vec()
-            }
-            None => bytes,
-        })
+        match &self.relay {
+            Some(fs) => fs.get_bytes(id, range).await,
+            None => Err(Error::Store(
+                "this blob store's backend does not relay bytes through the server".into(),
+            )),
+        }
     }
 }
 
@@ -275,19 +297,16 @@ impl BlobStore for PostgresBlobStore {
         .await
         .map_err(db)?;
 
-        let (url, expires_at) = self
-            .caps
-            .url(id, "write", spec.size, Duration::seconds(300));
-        let mut headers = vec![("content-length".into(), spec.size.to_string())];
-        if let Some(ct) = &spec.content_type {
-            headers.push(("content-type".into(), ct.clone()));
-        }
+        let target = self
+            .backend
+            .upload_target(id, &spec, Duration::seconds(300))
+            .await?;
         Ok(Reservation::Upload {
             id,
-            url,
-            method: "PUT".into(),
-            headers,
-            expires_at,
+            url: target.url,
+            method: target.method,
+            headers: target.headers,
+            expires_at: target.expires_at,
         })
     }
 
@@ -305,23 +324,47 @@ impl BlobStore for PostgresBlobStore {
         let declared_size: i64 = row.get("size");
         let declared_digest: Vec<u8> = row.get("sha256");
 
-        let bytes = self.get_bytes(id, None).await?;
-
         // Verify before the blob becomes readable. Without this a compromised
         // upload URL could substitute different content for a reference that has
         // already been committed into a step result, and every later read of that
         // step would return the substituted bytes with no sign anything changed.
-        if bytes.len() as i64 != declared_size {
+        let stored = self
+            .backend
+            .stored(id)
+            .await?
+            .ok_or_else(|| Error::Store(format!("no such blob {id}")))?;
+
+        if stored.size != declared_size {
             return Err(Error::Config(format!(
                 "blob_digest_mismatch: {id} declared {declared_size} bytes, stored {}",
-                bytes.len()
+                stored.size
             )));
         }
-        let actual = Sha256::digest(&bytes);
-        if actual.as_slice() != declared_digest.as_slice() {
-            return Err(Error::Config(format!(
-                "blob_digest_mismatch: {id} content does not match the declared sha256"
-            )));
+
+        match stored.sha256 {
+            // The backend read the digest from metadata; no bytes to read here.
+            Some(digest) => {
+                if digest != hex::encode(&declared_digest) {
+                    return Err(Error::Config(format!(
+                        "blob_digest_mismatch: {id} content does not match the declared sha256"
+                    )));
+                }
+            }
+            // Only the filesystem backend reaches this branch: it cannot answer
+            // "what is this object's sha256" without reading the bytes, so it
+            // says so via `None` rather than lying or hashing eagerly inside
+            // `stored`. A presigning backend answering `None` here would mean
+            // digest verification silently moved back into the control plane,
+            // defeating the reason bytes bypass it in the first place.
+            None => {
+                let bytes = self.get_bytes(id, None).await?;
+                let actual = Sha256::digest(&bytes);
+                if actual.as_slice() != declared_digest.as_slice() {
+                    return Err(Error::Config(format!(
+                        "blob_digest_mismatch: {id} content does not match the declared sha256"
+                    )));
+                }
+            }
         }
 
         sqlx::query("UPDATE blobs SET state='committed', committed_at=now() WHERE id=$1")
@@ -350,7 +393,7 @@ impl BlobStore for PostgresBlobStore {
                 .await
                 .map_err(db)?;
         let size = size.ok_or_else(|| Error::Store(format!("blob {id} is not readable")))?;
-        Ok(self.caps.url(id, "read", size, ttl).0)
+        self.backend.read_url(id, size, ttl)
     }
 
     async fn add_ref(&self, id: Uuid, run: Uuid, step_hash: &str) -> Result<()> {
@@ -391,7 +434,7 @@ impl BlobStore for PostgresBlobStore {
             // Bytes first, then the row. The other order can leave an orphaned
             // file with nothing left that knows its name; `stepd doctor` reports
             // those, but not having them is better than reporting them.
-            let _ = tokio::fs::remove_file(blob_path(&self.root, id)).await;
+            self.backend.delete(id).await?;
             sqlx::query("DELETE FROM blobs WHERE id=$1")
                 .bind(id)
                 .execute(&self.pool)
@@ -428,18 +471,6 @@ pub fn blob_ids(value: &serde_json::Value, out: &mut Vec<Uuid>) {
             }
         }
         _ => {}
-    }
-}
-
-/// Whether a path is inside a root, after normalisation.
-///
-/// Belt and braces for the transfer endpoint: blob ids are server-generated
-/// UUIDs, so a traversal should be impossible, but a path check costs nothing
-/// and the failure it prevents is arbitrary file read.
-pub fn is_within(root: &Path, path: &Path) -> bool {
-    match (root.canonicalize(), path.canonicalize()) {
-        (Ok(r), Ok(p)) => p.starts_with(r),
-        _ => path.starts_with(root),
     }
 }
 
@@ -497,15 +528,6 @@ mod tests {
         assert!(url.contains(&id.to_string()));
         let sig = url.split("sig=").nth(1).unwrap();
         assert!(c.verify(id, "read", 42, expires.timestamp(), sig).is_ok());
-    }
-
-    #[test]
-    fn blob_paths_shard_and_stay_under_the_root() {
-        let root = Path::new("/tmp/stepd-blobs");
-        let p = blob_path(root, Uuid::now_v7());
-        assert!(p.starts_with(root));
-        assert_eq!(p.components().count(), 6, "root + two shard levels + file");
-        assert!(is_within(root, &p));
     }
 
     #[test]

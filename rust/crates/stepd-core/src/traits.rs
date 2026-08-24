@@ -477,6 +477,76 @@ pub trait BlobStore: Send + Sync + 'static {
     async fn collect(&self, before: DateTime<Utc>) -> Result<u64>;
 }
 
+/// Where a blob's bytes live, and who mints the URLs that reach them.
+///
+/// Split out of [`BlobStore`] because the index is the same everywhere — the
+/// row, the per-namespace dedupe, the references recorded by trigger — and only
+/// the bytes and the URLs vary. Writing a second `BlobStore` to change where
+/// bytes live would duplicate the correctness-bearing half to swap the
+/// mechanical one.
+#[async_trait]
+pub trait BlobBackend: Send + Sync + 'static {
+    /// Where to PUT the bytes for a reserved blob, and what to send with them.
+    ///
+    /// A presigning backend MUST bind the declared size and digest into what it
+    /// returns, so the store itself refuses bytes that do not match. That is
+    /// what lets `stored` answer without reading the object.
+    async fn upload_target(
+        &self,
+        id: Uuid,
+        spec: &BlobSpec,
+        ttl: chrono::Duration,
+    ) -> Result<UploadTarget>;
+
+    /// A read-scoped, short-lived URL.
+    ///
+    /// Synchronous because the journal walk that mints these
+    /// (`attach_read_urls`) is synchronous, and neither an HMAC capability nor
+    /// SigV4 needs the network to sign.
+    fn read_url(&self, id: Uuid, size: i64, ttl: chrono::Duration) -> Result<String>;
+
+    /// What the backend holds for `id`, without transferring the object.
+    ///
+    /// `sha256` is `None` when the backend cannot answer from metadata; the
+    /// caller then falls back to reading the bytes, which is correct for a local
+    /// filesystem and defeats the purpose on object storage.
+    async fn stored(&self, id: Uuid) -> Result<Option<StoredObject>>;
+
+    /// Remove an object. Absent is success: collection must be idempotent.
+    async fn delete(&self, id: Uuid) -> Result<()>;
+
+    /// Whether this backend issues URLs that reach the bytes directly.
+    ///
+    /// `false` mounts protocol §8.3.2's relay and its warning. A backend that
+    /// answers `true` without truly presigning does not slow anything down — it
+    /// hands apps URLs that go nowhere.
+    fn can_presign(&self) -> bool;
+}
+
+/// Where to send bytes for a reserved blob.
+#[derive(Debug, Clone)]
+pub struct UploadTarget {
+    /// URL to send them to.
+    pub url: String,
+    /// HTTP method.
+    pub method: String,
+    /// Headers the caller must send verbatim. On a presigning backend these are
+    /// signed, so altering or dropping one makes the upload fail rather than
+    /// succeed unverified.
+    pub headers: Vec<(String, String)>,
+    /// When the URL stops working.
+    pub expires_at: DateTime<Utc>,
+}
+
+/// What a backend holds, as metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredObject {
+    /// Size in bytes.
+    pub size: i64,
+    /// Lowercase hex SHA-256, when the backend knows it without reading bytes.
+    pub sha256: Option<String>,
+}
+
 /// What an app wants to store.
 #[derive(Debug, Clone)]
 pub struct BlobSpec {
