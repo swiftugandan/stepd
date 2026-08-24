@@ -184,10 +184,12 @@ impl Harness {
             // for a server that does not use them, and would make the `blobs`
             // suite fail for a configuration reason rather than a protocol one.
             blob_key: options.signing_key.clone(),
-            blob_root: std::env::temp_dir().join(format!(
-                "stepd-conformance-blobs-{}",
-                Uuid::new_v4().simple()
-            )),
+            blob_backend: stepd_server::BlobBackendConfig::Filesystem {
+                root: std::env::temp_dir().join(format!(
+                    "stepd-conformance-blobs-{}",
+                    Uuid::new_v4().simple()
+                )),
+            },
             blob_base_url: format!("http://{api_addr}"),
             ..Default::default()
         };

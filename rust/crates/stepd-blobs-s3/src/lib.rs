@@ -40,7 +40,7 @@
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use rusty_s3::actions::{DeleteObject, GetObject, HeadObject, PutObject};
+use rusty_s3::actions::{DeleteObject, GetObject, HeadBucket, HeadObject, PutObject};
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use stepd_core::traits::{BlobBackend, BlobSpec, StoredObject, UploadTarget};
 use stepd_core::{Error, Result};
@@ -345,6 +345,47 @@ impl BlobBackend for S3Backend {
     }
 }
 
+/// What asking the object store about its bucket found.
+///
+/// Three states, not a bare `Result`: "reachable but these credentials are
+/// refused" and "never got an answer at all" call for different remedies —
+/// the first says check the access key, the second says check the endpoint
+/// and network path — and collapsing them into one error string makes an
+/// operator try the wrong fix first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BucketCheck {
+    /// `HeadBucket` returned success: the bucket exists and these credentials
+    /// can see it.
+    Reachable,
+    /// `HeadBucket` returned 403: the endpoint answered, but not for these
+    /// credentials.
+    Forbidden,
+    /// No usable answer — wrong endpoint, network failure, or a status other
+    /// than success or 403.
+    Unreachable(String),
+}
+
+impl S3Backend {
+    /// Ask the object store whether the configured bucket is there and usable,
+    /// with a `HeadBucket` rather than a write.
+    ///
+    /// For `stepd doctor`: wrong credentials or an unreachable endpoint today
+    /// surface only when an app's first upload fails, a system away from
+    /// whoever configured them. This lets an operator learn it at the same
+    /// moment they learn everything else `doctor` checks — including when the
+    /// main server will not start at all.
+    pub async fn check_bucket(&self) -> BucketCheck {
+        let action = HeadBucket::new(&self.bucket, Some(&self.credentials));
+        let url = action.sign(INTERNAL_TTL);
+        match self.http.head(url).send().await {
+            Ok(res) if res.status().is_success() => BucketCheck::Reachable,
+            Ok(res) if res.status() == reqwest::StatusCode::FORBIDDEN => BucketCheck::Forbidden,
+            Ok(res) => BucketCheck::Unreachable(format!("HeadBucket returned {}", res.status())),
+            Err(e) => BucketCheck::Unreachable(e.to_string()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,6 +507,26 @@ mod tests {
         let b = backend();
         assert!(b.can_presign());
         assert_eq!(b.name(), "s3");
+    }
+
+    #[tokio::test]
+    async fn a_bucket_check_against_nothing_listening_is_unreachable_not_a_panic() {
+        // No server on this port: the point is that `check_bucket` returns a
+        // value rather than propagating a transport error `doctor` would have
+        // to unwrap.
+        let b = S3Backend::new(S3Config {
+            endpoint: "http://127.0.0.1:1".parse().unwrap(),
+            region: "us-east-1".into(),
+            bucket: "stepd".into(),
+            access_key: "probe".into(),
+            secret_key: "probeprobe".into(),
+            path_style: true,
+        })
+        .expect("a backend builds from static configuration");
+        assert!(matches!(
+            b.check_bucket().await,
+            BucketCheck::Unreachable(_)
+        ));
     }
 
     #[test]

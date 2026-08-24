@@ -113,6 +113,22 @@ impl Problem {
             detail: detail.into(),
         }
     }
+
+    /// A dependency this server talks to — the object store behind a managed
+    /// blob, say — failed or gave an answer that could not be used.
+    ///
+    /// Distinct from `internal` and from `bad_request` on purpose: it is not
+    /// this server's own fault, so `internal` would send someone looking for a
+    /// bug that is not here, and it is not the caller's fault either, so a 4xx
+    /// would blame an app for bytes it uploaded correctly.
+    pub fn bad_gateway(code: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            title: "Bad gateway",
+            code,
+            detail: detail.into(),
+        }
+    }
 }
 
 impl From<stepd_core::Error> for Problem {

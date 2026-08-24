@@ -11,6 +11,7 @@ rust-version.workspace = true
 stepd-proto.workspace = true
 stepd-core.workspace = true
 stepd-store-postgres.workspace = true
+stepd-blobs-s3.workspace = true
 stepd-expr-cel.workspace = true
 stepd-transport-http.workspace = true
 serde.workspace = true
@@ -29,6 +30,7 @@ sqlx.workspace = true
 sha2.workspace = true
 hex.workspace = true
 rand.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

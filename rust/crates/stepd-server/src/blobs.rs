@@ -237,12 +237,29 @@ async fn write_content(
     // blob readable, and doing it now means a digest mismatch is reported to the
     // uploader — who can retry — instead of surfacing later as a failed run
     // whose cause is two systems away.
-    let blob = blobs
-        .commit_blob(id)
-        .await
-        .map_err(|e| Problem::bad_request("blob_digest_mismatch", e.to_string()))?;
+    let blob = blobs.commit_blob(id).await.map_err(commit_blob_problem)?;
 
     Ok((StatusCode::CREATED, Json(blob)).into_response())
+}
+
+/// Turn a `commit_blob` failure into the right response.
+///
+/// `commit_blob` returns `Error::Config` only for a real mismatch — the store
+/// answered and the bytes it holds do not match what was declared — which is
+/// what §8.3.2 reserves `blob_digest_mismatch` for. Anything else
+/// (`Error::Store`, `Error::Transport`) is the store failing to answer at all:
+/// no checksum in the object's metadata, or a HEAD that never landed. Telling
+/// the app `blob_digest_mismatch` for that says the upload was corrupt when
+/// the truth is the backend could not be asked. A free function so this
+/// mapping is testable without a database or an HTTP request.
+fn commit_blob_problem(e: stepd_core::Error) -> Problem {
+    match e {
+        stepd_core::Error::Config(msg) => Problem::bad_request("blob_digest_mismatch", msg),
+        other => Problem::bad_gateway(
+            "blob_backend_unavailable",
+            format!("could not verify the upload against the blob store: {other}"),
+        ),
+    }
 }
 
 /// `GET /v1/blobs/{id}/content` — read, with `Range` (§8.3.3).
@@ -341,7 +358,38 @@ impl ServerState {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_range;
+    use super::{commit_blob_problem, parse_range};
+    use axum::http::StatusCode;
+
+    #[test]
+    fn a_real_mismatch_is_reported_as_a_digest_mismatch() {
+        // §8.3.2 reserves this code for the store having answered and the
+        // bytes it holds not matching what was declared.
+        let p = commit_blob_problem(stepd_core::Error::Config(
+            "blob_digest_mismatch: content does not match the declared sha256".into(),
+        ));
+        assert_eq!(p.status, StatusCode::BAD_REQUEST);
+        assert_eq!(p.code, "blob_digest_mismatch");
+    }
+
+    #[test]
+    fn a_store_that_could_not_answer_is_not_reported_as_a_digest_mismatch() {
+        // The two conditions Task 4 added: no checksum in the object's
+        // metadata, or a HEAD that never landed. Neither is the app's fault,
+        // and telling it "blob_digest_mismatch" says its upload was corrupt
+        // when the truth is the backend could not be asked.
+        for e in [
+            stepd_core::Error::Store("the object store reports no checksum".into()),
+            stepd_core::Error::Transport("HeadObject for blob: connection refused".into()),
+        ] {
+            let p = commit_blob_problem(e);
+            assert_eq!(p.status, StatusCode::BAD_GATEWAY, "got code {}", p.code);
+            assert_ne!(
+                p.code, "blob_digest_mismatch",
+                "a backend failure must not read as a claim about the app's bytes"
+            );
+        }
+    }
 
     #[test]
     fn a_bounded_range_is_clamped_to_the_object() {

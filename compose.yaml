@@ -91,6 +91,25 @@ services:
       - STEPD_BLOB_BASE_URL=${STEPD_BLOB_BASE_URL:-http://localhost:8080}
       - STEPD_BLOB_MAX_SIZE=${STEPD_BLOB_MAX_SIZE:-104857600}
 
+      # ---- managed blobs: S3 backend. Unset (the default) keeps the
+      # filesystem-plus-relay lines above in force. Uncomment all of these,
+      # the `minio` service near the bottom of this file, and set
+      # STEPD_BLOB_BACKEND=s3 in .env to presign against it instead — see
+      # docs/blob-backends.md before picking a real object store. All four of
+      # endpoint, bucket, access key and secret key are required once
+      # STEPD_BLOB_BACKEND=s3; `serve` refuses to start on a half-configured
+      # one rather than hand out upload URLs against a bucket that half exists.
+      # - STEPD_BLOB_BACKEND=${STEPD_BLOB_BACKEND:-}
+      # - STEPD_BLOB_S3_ENDPOINT=http://minio:9000
+      # - STEPD_BLOB_S3_REGION=us-east-1
+      # - STEPD_BLOB_S3_BUCKET=stepd
+      # - STEPD_BLOB_S3_ACCESS_KEY=${STEPD_BLOB_S3_ACCESS_KEY:-}
+      # - STEPD_BLOB_S3_SECRET_KEY=${STEPD_BLOB_S3_SECRET_KEY:-}
+      # Read BY VALUE, unlike the egress flags below: "0" here means off. Most
+      # self-hosted servers (minio included) need this true; real AWS wants it
+      # left unset.
+      # - STEPD_BLOB_S3_PATH_STYLE=true
+
       # ---- egress. These three are read by presence, not by value: setting
       # STEPD_ALLOW_PRIVATE_EGRESS=0 ENABLES private egress. That is why they
       # are bare names here — an unset variable is passed through as absent,
@@ -158,8 +177,11 @@ services:
 
   # --------------------------------------------------------------- diagnostics
   #   docker compose --profile ops run --rm doctor
-  # Thirteen checks against the live database; non-zero exit on anything
-  # critical. Runnable when the server will not start, which is when it matters.
+  # Structural, connectivity and blob-store checks against the live database;
+  # non-zero exit on anything critical. Runnable when the server will not
+  # start, which is when it matters — so it needs the same STEPD_BLOB_S3_*
+  # variables as the `stepd` service above if you have uncommented those there,
+  # or the bucket-reachability check has nothing to check.
   doctor:
     build:
       context: .
@@ -174,6 +196,13 @@ services:
     environment:
       - STEPD_DATABASE_URL=postgres://${POSTGRES_USER:-stepd}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-stepd}
       - STEPD_LOG=${STEPD_LOG:-info}
+      # - STEPD_BLOB_BACKEND=${STEPD_BLOB_BACKEND:-}
+      # - STEPD_BLOB_S3_ENDPOINT=http://minio:9000
+      # - STEPD_BLOB_S3_REGION=us-east-1
+      # - STEPD_BLOB_S3_BUCKET=stepd
+      # - STEPD_BLOB_S3_ACCESS_KEY=${STEPD_BLOB_S3_ACCESS_KEY:-}
+      # - STEPD_BLOB_S3_SECRET_KEY=${STEPD_BLOB_S3_SECRET_KEY:-}
+      # - STEPD_BLOB_S3_PATH_STYLE=true
 
   # --------------------------------------------------------------- your app
   # The execution model is push: the server calls your application's endpoint,
@@ -192,9 +221,41 @@ services:
   #     -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   #     -d '{"url":"http://app:9944", ...}'
 
+  # --------------------------------------------------------- object storage
+  # Commented out: the default `docker compose up` stays the two-service
+  # stack (plus this server) described in README.md, not a third container
+  # nobody asked for. Uncomment this and the matching STEPD_BLOB_S3_* lines
+  # on the `stepd` and `doctor` services above to try the S3 backend locally.
+  # Read docs/blob-backends.md first — not every S3-compatible server
+  # actually enforces the checksum this backend's presigned uploads rely on.
+  #
+  # minio:
+  #   image: quay.io/minio/minio:latest
+  #   restart: unless-stopped
+  #   command: ["server", "/data"]
+  #   environment:
+  #     MINIO_ROOT_USER: ${STEPD_BLOB_S3_ACCESS_KEY:?set STEPD_BLOB_S3_ACCESS_KEY in .env}
+  #     MINIO_ROOT_PASSWORD: ${STEPD_BLOB_S3_SECRET_KEY:?set STEPD_BLOB_S3_SECRET_KEY in .env}
+  #   volumes:
+  #     - minio-data:/data
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 20
+  #     start_period: 10s
+  #
+  # This backend never creates the bucket itself (`stepd-blobs-s3`'s module
+  # docs), so something has to before `serve` will accept an upload:
+  #   docker compose --profile ops run --rm --entrypoint sh minio -c \
+  #     "mc alias set local http://minio:9000 \$MINIO_ROOT_USER \$MINIO_ROOT_PASSWORD && \
+  #      mc mb -p local/stepd"
+
 volumes:
   pgdata:
   # Bytes behind every $blob reference in a live run's journal. Losing this
   # volume fails those runs on their next replay, hours later, with a missing
   # object — so it is a named volume, not a container-local path.
   blobs:
+  # Commented out with the `minio` service above; uncomment together.
+  # minio-data:

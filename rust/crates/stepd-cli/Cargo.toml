@@ -17,6 +17,7 @@ stepd-core.workspace = true
 stepd-server.workspace = true
 stepd-conformance.workspace = true
 stepd-store-postgres.workspace = true
+stepd-blobs-s3.workspace = true
 stepd-expr-cel.workspace = true
 stepd-transport-http.workspace = true
 serde.workspace = true
