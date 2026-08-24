@@ -72,30 +72,38 @@ overstated the opposite way and that is how four defects sat undetected.
   carries a 256 KiB `$blob` and asserts that everything crossing the server's
   own socket, both directions, stayed under 32 KiB; `stepd-blobs-s3/tests/live.rs`
   checks the store's enforcement directly. Both skip loudly without
-  `STEPD_TEST_S3_*` — and the end-to-end one also needs
-  `STEPD_TEST_DATABASE_URL` — and no lane in `.github/workflows/ci.yml` sets
-  either for them. So this is evidence that exists and passes locally, and no
-  evidence that is produced automatically. `docs/blob-backends.md` records what
+  `STEPD_TEST_S3_*`, and no lane in `.github/workflows/ci.yml` sets it —
+  `grep -c STEPD_TEST_S3 .github/workflows/ci.yml` is 0. (The end-to-end one
+  also needs `STEPD_TEST_DATABASE_URL`, which CI *does* set at `ci.yml:108`, so
+  `tier 2 · integration` compiles and runs that test on every push — and it
+  skips, for want of the S3 variables.) So this is evidence that exists and
+  passes locally, and no evidence that is produced automatically.
+  `docs/blob-backends.md` records what
   MinIO `RELEASE.2025-09-07T16-13-09Z` and RustFS `v1.0.0-beta.12` actually did
   when probed — both reject a presigned PUT whose body does not match its signed
   checksum, but RustFS is a beta release and reports that rejection under the
   wrong header name (`Content-Md5`), so its error text is not a basis for any
   claim about which header it checked.
-* **One regression in the S3 backend would escape every test.** If
-  `S3Backend::stored` were changed to fetch the object and hash it itself,
-  still returning `Some(digest)`, nothing would go red:
+* **One narrow regression in the S3 backend would escape every test.** If
+  `S3Backend::stored` kept its `HeadObject` and kept refusing an object the
+  store reports no checksum for, and merely *added* a `GetObject` beside them,
+  nothing would go red — and the payload would be crossing the wire between the
+  server and the object store again.
   `a_committed_object_reports_its_digest_without_transferring_it` measures the
   answer and not the transfer, and says so in its own comment; and
   `no_object_bytes_reach_the_server_on_the_s3_path` counts bytes on the server's
   client-facing socket, which server-to-store traffic never crosses. The
-  neighbouring regression is caught, twice: `stored` answering `None` — which
-  would route `commit_blob` into its read-and-hash arm — fails
-  `an_object_the_store_reports_no_checksum_for_is_an_error_not_a_fallback`, and
-  on a real deployment it fails the commit loudly anyway, because
+  neighbouring regressions *are* caught. Replacing the `HeadObject` with a
+  GET-and-hash fails
+  `an_object_the_store_reports_no_checksum_for_is_an_error_not_a_fallback`,
+  because that test's object has no checksum and the replacement would answer
+  for it instead of erroring. And `stored` returning `None` — which would route
+  `commit_blob` into its read-and-hash arm — fails the same test, and on a real
+  deployment fails the commit loudly anyway, because
   `PostgresBlobStore::get_bytes` errors on a store built with `relay: None` and
-  that is how `Server::build` builds the S3 one. A narrow hole, then, recorded
-  because it is the one change that could put payload bytes back through the
-  control plane without a red build.
+  that is how `Server::build` builds the S3 one. So: one specific shape, not a
+  class, recorded because it is the one change that could put payload bytes back
+  onto the control plane without a red build.
 * **A `$blob` that arrives outside an attempt envelope is still never
   verified.** §8.3.2 requires the server to check `size` and `sha256` before a
   blob becomes readable. `Dispatcher::verify_blobs` does that for an envelope's
