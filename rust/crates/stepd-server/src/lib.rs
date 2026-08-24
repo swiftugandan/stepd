@@ -330,7 +330,7 @@ impl Server {
                 caps.clone(),
             ));
             store = store.with_blob_backend(fs.clone() as Arc<dyn BlobBackend>);
-            Some(Arc::new(
+            let blob_store = Arc::new(
                 stepd_store_postgres::PostgresBlobStore::with_backend_and_relay(
                     store.pool().clone(),
                     fs.clone() as Arc<dyn BlobBackend>,
@@ -338,7 +338,22 @@ impl Server {
                     caps,
                 )
                 .with_max_size(config.blob_max_size),
-            ))
+            );
+            // Once, at start-up, naming the backend — not per request, where
+            // this warning already fires (`blobs.rs`'s `write_content`). A
+            // startup line alone would not tell an operator the fallback is
+            // still in use at three in the morning; a per-request line alone
+            // would not tell them their deployment is on the fallback path at
+            // all. §8.3.2 calls the relay a compatibility fallback, and the
+            // filesystem backend is the only one shipped here that needs it.
+            if !blob_store.can_presign() {
+                tracing::warn!(
+                    backend = "filesystem",
+                    "managed-blob backend cannot presign; mounting the protocol §8.3.2 relay \
+                     route, which puts payload bytes through this process on every transfer"
+                );
+            }
+            Some(blob_store)
         } else {
             None
         };
@@ -413,7 +428,13 @@ impl Server {
         Router::new()
             .route("/", get(console::serve))
             .merge(api::router())
-            .merge(blobs::router())
+            .merge(blobs::router(
+                self.state
+                    .blobs
+                    .as_ref()
+                    .map(|b| !b.can_presign())
+                    .unwrap_or(false),
+            ))
             .with_state(self.state.clone())
             .layer(tower_http::trace::TraceLayer::new_for_http())
     }

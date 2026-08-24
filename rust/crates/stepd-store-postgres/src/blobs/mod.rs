@@ -249,6 +249,15 @@ impl PostgresBlobStore {
         &self.caps
     }
 
+    /// Whether the backend issues URLs that reach the bytes directly.
+    ///
+    /// A passthrough to [`BlobBackend::can_presign`], so the server can decide
+    /// whether to mount protocol §8.3.2's relay route without naming a concrete
+    /// backend type.
+    pub fn can_presign(&self) -> bool {
+        self.backend.can_presign()
+    }
+
     /// Override the single-blob ceiling.
     pub fn with_max_size(mut self, bytes: i64) -> Self {
         self.max_size = bytes;

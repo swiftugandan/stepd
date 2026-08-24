@@ -253,6 +253,115 @@ macro_rules! fixture_or_skip {
     };
 }
 
+/// A `BlobBackend` that presigns, so it has no use for §8.3.2's relay.
+///
+/// Deliberately does not implement `RelayBytes` — a backend that can presign
+/// has nothing to relay, which is exactly the property that must make
+/// `blobs::router` leave the content route unmounted. Never exercised beyond
+/// `can_presign`: reserving or transferring a real blob through it is not what
+/// this fixture is for.
+struct PresigningBackend;
+
+#[async_trait::async_trait]
+impl stepd_core::traits::BlobBackend for PresigningBackend {
+    async fn upload_target(
+        &self,
+        id: Uuid,
+        _spec: &stepd_core::traits::BlobSpec,
+        ttl: chrono::Duration,
+    ) -> stepd_core::Result<stepd_core::traits::UploadTarget> {
+        Ok(stepd_core::traits::UploadTarget {
+            url: format!("https://example-object-store.test/{id}"),
+            method: "PUT".to_string(),
+            headers: Vec::new(),
+            expires_at: chrono::Utc::now() + ttl,
+        })
+    }
+
+    fn read_url(&self, id: Uuid, size: i64, _ttl: chrono::Duration) -> stepd_core::Result<String> {
+        Ok(format!(
+            "https://example-object-store.test/{id}?size={size}"
+        ))
+    }
+
+    async fn stored(
+        &self,
+        _id: Uuid,
+    ) -> stepd_core::Result<Option<stepd_core::traits::StoredObject>> {
+        Ok(None)
+    }
+
+    async fn delete(&self, _id: Uuid) -> stepd_core::Result<()> {
+        Ok(())
+    }
+
+    fn can_presign(&self) -> bool {
+        true
+    }
+}
+
+/// A running server whose managed-blob backend is [`PresigningBackend`].
+///
+/// Not `fixture()`: that one always builds a `FilesystemBackend`, which is the
+/// case that keeps the relay mounted. `Server::build` has no configuration
+/// knob for swapping the backend — nothing outside a test should want one, a
+/// deployment picks the filesystem fallback or a real presigning backend, not
+/// a stub — so this fixture builds a server the normal way and then replaces
+/// `state.blobs` before the router (and the mount decision it makes) is built.
+///
+/// Per-instance state throughout, never a `static`: the server, listener and
+/// base URL all live on the returned struct, not in shared global state.
+struct PresigningFixture {
+    base: String,
+    _server: Arc<Server>,
+}
+
+async fn fixture_with_presigning_backend() -> Option<PresigningFixture> {
+    let database_url = std::env::var("STEPD_TEST_DATABASE_URL").ok()?;
+
+    let mut config = Config::from_env();
+    config.database_url = database_url;
+    config.blob_key = SIGNING_KEY.to_vec();
+    // Never read: `PresigningBackend` touches no filesystem. `Server::build`
+    // still builds a `FilesystemBackend` internally before it is replaced
+    // below, and that construction needs a path even though nothing is
+    // written under it.
+    config.blob_root =
+        std::env::temp_dir().join(format!("stepd-e2e-presign-{}", Uuid::new_v4().simple()));
+    config.egress = EgressPolicy::development();
+
+    let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_addr = api_listener.local_addr().unwrap();
+    config.blob_base_url = format!("http://{api_addr}");
+
+    let blob_base_url = config.blob_base_url.clone();
+    let blob_key = config.blob_key.clone();
+
+    let mut server = Server::build(config).await.expect("server");
+    server.migrate().await.expect("migrate");
+
+    // Swap the `FilesystemBackend` `Server::build` wired up for one that
+    // presigns — the case this fixture exists to cover.
+    server.state.blobs = Some(Arc::new(
+        stepd_store_postgres::PostgresBlobStore::with_backend(
+            server.state.store.pool().clone(),
+            Arc::new(PresigningBackend) as Arc<dyn stepd_core::traits::BlobBackend>,
+            stepd_store_postgres::Capability::new(blob_base_url, blob_key),
+        ),
+    ));
+
+    let server = Arc::new(server);
+    let router = server.router();
+    tokio::spawn(async move {
+        let _ = axum::serve(api_listener, router).await;
+    });
+
+    Some(PresigningFixture {
+        base: format!("http://{api_addr}"),
+        _server: server,
+    })
+}
+
 /// Drive the namespace until the run finishes or the budget runs out.
 async fn drive_until_done(f: &Fixture, run: Uuid, max_ticks: u32) -> String {
     use stepd_core::traits::StateStore;
@@ -1176,5 +1285,69 @@ async fn a_blob_capability_cannot_be_repurposed() {
         !read.status().is_success(),
         "a write capability must not be usable for reading; the direction is inside \
          the signature precisely so this cannot be edited"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_presigning_backend_does_not_expose_the_relay_route() {
+    // The relay is a fallback (§8.3.2). Leaving it mounted next to a backend
+    // that presigns leaves a second, unwarned path to the same bytes — and the
+    // capability it accepts is signed with a different key than the one the
+    // object store checks.
+    let f = match fixture_with_presigning_backend().await {
+        Some(f) => f,
+        None => {
+            eprintln!("SKIPPED: set STEPD_TEST_DATABASE_URL to run the end-to-end tests");
+            return;
+        }
+    };
+
+    let http = reqwest::Client::new();
+    let res = http
+        .put(format!(
+            "{}/v1/blobs/{}/content?dir=write&size=1&exp=1&sig=x",
+            f.base,
+            Uuid::now_v7()
+        ))
+        .body("x")
+        .send()
+        .await
+        .expect("the server answered");
+    assert_eq!(res.status(), 404, "the relay route must not exist here");
+
+    // A bare 404 is not enough: a run that does not exist, a mistyped path, or
+    // an auth redirect could all produce one just as well, and none of those
+    // would mean the route is absent. Every error this server's handlers raise
+    // is a Problem Details document (`application/problem+json`, a `code`
+    // field) — see `Problem::into_response`. Axum's own fallback for an
+    // unmatched route carries neither, because no handler ever ran to build
+    // one. That is what actually distinguishes "this route does not exist"
+    // from "this route exists and refused you".
+    assert_ne!(
+        res.headers().get("content-type").map(|v| v.as_bytes()),
+        Some(b"application/problem+json".as_slice()),
+        "a Problem Details response means a handler ran and refused the request; a route \
+         that was never mounted never reaches one"
+    );
+    let body = res.bytes().await.expect("body");
+    assert!(
+        body.is_empty(),
+        "axum's fallback for an unmatched route has an empty body; a non-empty body would \
+         mean some handler produced this 404, i.e. the route exists after all"
+    );
+
+    // And the server itself is up, and still mounts the other blob route: the
+    // 404 above is about the content route specifically, not a fixture that
+    // failed to start or a base URL that is wrong.
+    let reserve_status = http
+        .post(format!("{}/v1/blobs:reserve", f.base))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("the server answered")
+        .status();
+    assert_ne!(
+        reserve_status, 404,
+        "the reserve route must still exist; only the relay content route is conditional"
     );
 }

@@ -42,13 +42,19 @@ use crate::problem::{ApiResult, Problem};
 use crate::ServerState;
 
 /// Mount the transfer endpoints.
-pub fn router() -> Router<ServerState> {
-    Router::new()
-        .route("/v1/blobs:reserve", post(reserve))
-        .route(
-            "/v1/blobs/{id}/content",
-            get(read_content).put(write_content),
-        )
+///
+/// `relay` mounts §8.3.2's compatibility route. It is passed rather than
+/// assumed because a backend that presigns has no use for it, and an unused
+/// route that accepts bytes is a second way in that nothing warns about.
+pub fn router(relay: bool) -> Router<ServerState> {
+    let r = Router::new().route("/v1/blobs:reserve", post(reserve));
+    if !relay {
+        return r;
+    }
+    r.route(
+        "/v1/blobs/{id}/content",
+        get(read_content).put(write_content),
+    )
 }
 
 /// `POST /v1/blobs:reserve` — phase one of the two-phase upload.
