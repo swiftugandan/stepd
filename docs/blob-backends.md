@@ -103,3 +103,22 @@ against the same URL and headers (control case), re-PUT the correct bytes,
 headers), then a presigned `GetObject` fetched with `Range: bytes=0-3`
 (expect 206 + `Content-Range`). The probe source is throwaway and was not
 committed.
+
+## Temporary credentials
+
+`STEPD_BLOB_S3_SESSION_TOKEN` carries a session token into the SigV4
+signature, which is what makes an AssumeRole, IRSA or instance-profile
+credential usable here at all. Set it alongside the access key and secret key;
+leave it out for a permanent key pair, which is what the servers probed above
+were driven with.
+
+What this does not do matters as much as what it does. The token is read once,
+when the backend is constructed, and held for the life of the process. Nothing
+here calls STS, watches an expiry, or refreshes anything. So a token that
+expires while `stepd serve` is running produces presigned URLs the object store
+rejects — with a signature error naming neither the token nor the variable —
+and the only fix is a fresh token in the environment and a restart.
+
+If that is not acceptable for a deployment, a permanent key pair scoped tightly
+to the one bucket is the honest alternative. It is not this field plus an
+assumption that something renews it.

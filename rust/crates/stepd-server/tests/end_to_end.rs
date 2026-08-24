@@ -1532,6 +1532,7 @@ fn s3_test_config() -> Option<stepd_blobs_s3::S3Config> {
         bucket: var("STEPD_TEST_S3_BUCKET", "stepd"),
         access_key: var("STEPD_TEST_S3_ACCESS_KEY", "probe"),
         secret_key: var("STEPD_TEST_S3_SECRET_KEY", "probeprobe"),
+        session_token: std::env::var("STEPD_TEST_S3_SESSION_TOKEN").ok(),
         path_style: true,
     })
 }
@@ -1618,6 +1619,7 @@ async fn fixture_with_s3(label: &str) -> Option<S3Fixture> {
         bucket: s3.bucket.clone(),
         access_key: s3.access_key.clone(),
         secret_key: s3.secret_key.clone(),
+        session_token: s3.session_token.clone(),
         path_style: s3.path_style,
     }));
     config.blob_base_url = base.clone();

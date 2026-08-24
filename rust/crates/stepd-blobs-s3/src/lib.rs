@@ -137,6 +137,20 @@ pub struct S3Config {
     pub access_key: String,
     /// Secret access key.
     pub secret_key: String,
+    /// Session token, for a temporary credential.
+    ///
+    /// `Some` selects SigV4's `X-Amz-Security-Token`, which is what makes an
+    /// AssumeRole, IRSA or instance-profile credential usable at all. `None`
+    /// is a permanent key pair and signs exactly as this backend did before
+    /// the field existed.
+    ///
+    /// This backend never obtains or refreshes one: it reads what it was
+    /// given, at construction, and holds it for the life of the process. A
+    /// token that expires is a token whose presigned URLs start failing, and
+    /// the fix is a restart with a fresh one — see `docs/blob-backends.md`.
+    /// Nothing here calls STS or watches an expiry, and pretending otherwise
+    /// would be the more dangerous of the two mistakes.
+    pub session_token: Option<String>,
     /// Address the bucket as a path segment rather than a hostname.
     ///
     /// Required for most self-hosted servers, which have no wildcard DNS to
@@ -224,10 +238,17 @@ impl S3Backend {
             .timeout(request)
             .build()
             .map_err(|e| Error::Transport(format!("building the blob store client: {e}")))?;
+        // `new_with_token` whenever a token is present: SigV4 rejects a
+        // temporary credential presented without its token, with a signature
+        // error that names neither.
+        let credentials = match config.session_token {
+            Some(token) => Credentials::new_with_token(config.access_key, config.secret_key, token),
+            None => Credentials::new(config.access_key, config.secret_key),
+        };
         Ok(Self {
             internal,
             presign,
-            credentials: Credentials::new(config.access_key, config.secret_key),
+            credentials,
             http,
         })
     }
@@ -602,6 +623,7 @@ mod tests {
             bucket: "stepd".into(),
             access_key: "probe".into(),
             secret_key: "probeprobe".into(),
+            session_token: None,
             path_style: true,
         })
         .expect("a backend builds from static configuration")
@@ -695,6 +717,7 @@ mod tests {
             bucket: "stepd".into(),
             access_key: "probe".into(),
             secret_key: "probeprobe".into(),
+            session_token: None,
             path_style: true,
         };
         let printed = format!("{cfg:?}");
@@ -727,6 +750,7 @@ mod tests {
             bucket: "stepd".into(),
             access_key: "probe".into(),
             secret_key: "probeprobe".into(),
+            session_token: None,
             path_style: true,
         })
         .expect("a backend builds from static configuration");
@@ -775,6 +799,7 @@ mod tests {
                 bucket: "stepd".into(),
                 access_key: "probe".into(),
                 secret_key: "probeprobe".into(),
+                session_token: None,
                 path_style: true,
             },
             std::time::Duration::from_millis(200),
@@ -818,6 +843,7 @@ mod tests {
             bucket: "stepd".into(),
             access_key: "probe".into(),
             secret_key: "probeprobe".into(),
+            session_token: None,
             path_style: true,
         }
     }
@@ -867,6 +893,51 @@ mod tests {
             .read_url(Uuid::nil(), 0, Duration::seconds(60))
             .expect("a positive ttl signs");
         assert!(url.starts_with("http://minio:9000/"), "got {url}");
+    }
+
+    #[test]
+    fn a_session_token_reaches_the_signature() {
+        let cfg = S3Config {
+            session_token: Some("FQoGZXIvYXdzEExampleToken".into()),
+            ..split_endpoint_config()
+        };
+        let b = S3Backend::new(cfg).expect("a complete config builds");
+        let url = b
+            .read_url(Uuid::nil(), 0, Duration::seconds(60))
+            .expect("a positive ttl signs");
+        assert!(
+            url.contains("X-Amz-Security-Token"),
+            "a temporary credential is only usable if its token is in the query; got {url}"
+        );
+    }
+
+    #[test]
+    fn no_session_token_signs_without_one() {
+        // A permanent key pair must sign exactly as it did before this field
+        // existed. A token that reached the query empty would be rejected by
+        // the store as a signature error naming neither it nor the variable.
+        let cfg = S3Config {
+            session_token: None,
+            ..split_endpoint_config()
+        };
+        let b = S3Backend::new(cfg).expect("a complete config builds");
+        let url = b
+            .read_url(Uuid::nil(), 0, Duration::seconds(60))
+            .expect("a positive ttl signs");
+        assert!(!url.contains("X-Amz-Security-Token"), "got {url}");
+    }
+
+    #[test]
+    fn a_session_token_does_not_reach_a_debug_line() {
+        // It is a credential, exactly as much as the secret key is, and the
+        // hand-written Debug on this struct exists so credentials do not reach
+        // a log the first time someone prints a config.
+        let cfg = S3Config {
+            session_token: Some("FQoGZXIvYXdzEExampleToken".into()),
+            ..split_endpoint_config()
+        };
+        let printed = format!("{cfg:?}");
+        assert!(!printed.contains("ExampleToken"), "got {printed}");
     }
 
     #[tokio::test]
