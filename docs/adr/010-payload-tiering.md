@@ -133,15 +133,19 @@ verification, URL minting and deletion (§8.5).
   signature, so the store rejects mismatched bytes itself and `stored` answers from a
   `HeadObject`. The server issues only `HeadObject` and `DeleteObject` against an object
   store; it never transfers an object.
-* **One shape of that regression escapes every test.** An `S3Backend::stored` that fetched
-  the object and hashed it itself, still returning `Some(digest)`, would pass everything:
+* **One narrow shape of that regression escapes every test:** an `S3Backend::stored` that
+  keeps the `HeadObject` and keeps erroring for an object the store reports no checksum for,
+  and simply *adds* a `GetObject` beside them. It would pass everything —
   `a_committed_object_reports_its_digest_without_transferring_it` measures the answer and not
   the transfer, and says so in its own comment, and
   `no_object_bytes_reach_the_server_on_the_s3_path` counts bytes on the server's
-  client-facing socket, which server-to-store traffic never crosses. The other shape is
-  caught twice: `stored` returning `None`, which routes `commit_blob` into its read-and-hash
-  arm, fails `an_object_the_store_reports_no_checksum_for_is_an_error_not_a_fallback`, and on
-  a real deployment fails the commit loudly regardless, because that arm calls
+  client-facing socket, which server-to-store traffic never crosses — while putting the
+  payload back on the wire between the server and the store. The neighbouring shapes are
+  caught. *Replacing* the `HeadObject` with a GET-and-hash fails
+  `an_object_the_store_reports_no_checksum_for_is_an_error_not_a_fallback`, whose object
+  carries no checksum and which asserts an error there rather than an answer. And `stored`
+  returning `None`, which routes `commit_blob` into its read-and-hash arm, fails that same
+  test, and on a real deployment fails the commit loudly regardless, because that arm calls
   `PostgresBlobStore::get_bytes` and `Server::build` gives the S3 store `relay: None`, which
   makes `get_bytes` an error rather than a download.
 * **§8.3.2's verify-before-readable is enforced at one entry point, not everywhere.**
@@ -240,9 +244,10 @@ verification, URL minting and deletion (§8.5).
   `rust/crates/stepd-server/tests/end_to_end.rs`, which drives a real run through a real SDK
   app and asserts that everything crossing the server's own socket stayed under 32 KiB while
   a 256 KiB payload reached the object store. All of these skip loudly without
-  `STEPD_TEST_S3_*`, the end-to-end one also without `STEPD_TEST_DATABASE_URL`, and no lane
-  in `.github/workflows/ci.yml` sets either: this is evidence that passes locally and
-  evidence nothing produces automatically.
+  `STEPD_TEST_S3_*`, which no lane in `.github/workflows/ci.yml` sets. The end-to-end one
+  needs `STEPD_TEST_DATABASE_URL` as well; CI does set that (`ci.yml:108`), so
+  `tier 2 · integration` runs the test on every push and it skips there for want of the S3
+  variables. Evidence that passes locally, then, and nothing automatic.
 * `rust/migrations/0001_initial.sql`: `blobs` carries `UNIQUE (ns, sha256)` commented "dedupe
   within a tenant, never across"; `blob_refs` is keyed `(blob_id, run_id, step_hash)`.
 * `spec/PROTOCOL.md` §8 is the normative statement; `rust/crates/stepd-cli/src/doctor.rs`

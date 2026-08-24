@@ -1813,25 +1813,36 @@ async fn no_object_bytes_reach_the_server_on_the_s3_path() {
     // payload — or any large fraction of it — through this socket instead of
     // straight to the object store would clear it.
     //
-    // What this does NOT catch: a `commit_blob` that downloaded the object
-    // from the object store to hash it would add no bytes here at all — that
-    // traffic runs between this server process and the object store, never
-    // touching the socket this counter watches. Today that path is closed
-    // structurally rather than by a test: `commit_blob`
-    // (`stepd-store-postgres/src/blobs/mod.rs`) only downloads and hashes
-    // when `BlobBackend::stored` answers `sha256: None`, and `S3Backend::stored`
-    // never does — it errors instead of returning `None` when the object
-    // store reports no checksum. Nothing here or in `stepd-blobs-s3` asserts
-    // that a *regressed* `S3Backend::stored` returning `None` would still be
-    // caught; `stepd-blobs-s3`'s own
-    // `a_committed_object_reports_its_digest_without_transferring_it` only
-    // checks that `stored` reports the right digest today, and its own doc
-    // comment says a backend that downloaded to hash it would pass that
-    // assertion too. As of this test, neither suite runs in CI — both exist
-    // and pass locally with `STEPD_TEST_DATABASE_URL` and `STEPD_TEST_S3_*`
-    // set, but the CI lane that was meant to run them was reverted pending
-    // separate review of how it starts an S3-compatible service, so BR-19 is
-    // not yet proven by anything CI runs.
+    // What this does NOT catch: server-to-store traffic. A download between
+    // this process and the object store adds no bytes here at all, because it
+    // never touches the socket this counter watches.
+    //
+    // Most ways of reintroducing one are caught elsewhere, and it is worth
+    // being exact about which, because an earlier version of this comment
+    // claimed nothing caught any of them. `commit_blob`
+    // (`stepd-store-postgres/src/blobs/mod.rs`) downloads and hashes only when
+    // `BlobBackend::stored` answers `sha256: None`. A regressed
+    // `S3Backend::stored` that answered `None` fails
+    // `an_object_the_store_reports_no_checksum_for_is_an_error_not_a_fallback`
+    // in `stepd-blobs-s3`, and on a real deployment fails the commit loudly
+    // regardless: `Server::build` gives the S3 store `relay: None`, so the
+    // `get_bytes` call in that arm is an error, not a download. One that
+    // *replaced* the `HeadObject` with a GET-and-hash fails the same test,
+    // whose object carries no checksum and which asserts an error there.
+    //
+    // What is genuinely untested is narrower: a `stored` that keeps the
+    // `HeadObject` and keeps erroring for a checksumless object, and merely
+    // adds a `GetObject` beside them.
+    // `a_committed_object_reports_its_digest_without_transferring_it` measures
+    // the answer and not the transfer — its own comment says so — and this
+    // counter cannot see it either.
+    //
+    // On CI: `tier 2 · integration` sets `STEPD_TEST_DATABASE_URL` and runs
+    // `cargo test --workspace`, so this test executes on every push and skips,
+    // because nothing in `.github/workflows/ci.yml` sets `STEPD_TEST_S3_*`.
+    // The lane that would have was reverted pending separate review of how it
+    // starts an S3-compatible service. So BR-19 on this path is proven by a
+    // test that passes locally and by nothing CI runs.
     let total = f.server_bytes.load(Ordering::SeqCst);
     const CONTROL_PLANE_TRAFFIC_CEILING: usize = 32 * 1024;
     assert!(
