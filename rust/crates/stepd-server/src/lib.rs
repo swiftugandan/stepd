@@ -356,9 +356,9 @@ impl Config {
         }
         if self.blob_key.is_empty() {
             tracing::warn!(
-                "no STEPD_BLOB_SIGNING_KEY is set; the managed-blob endpoints will refuse \
-                 every request. Set one, or use external $ref values for payloads the \
-                 application already stores."
+                "no STEPD_BLOB_SIGNING_KEY is set; POST /v1/blobs:reserve will answer 501 \
+                 and the §8.3.2 relay route is not mounted at all. Set one, or use external \
+                 $ref values for payloads the application already stores."
             );
         }
     }
@@ -554,8 +554,9 @@ impl Server {
         let mut store =
             PostgresStore::connect(&config.database_url, config.max_connections).await?;
         // Managed blobs are optional. A server with no blob signing key still
-        // runs every other path; `:reserve` answers 501 and the relay route is
-        // never mounted, which is honest and is what `validate` warns about.
+        // runs every other path; `:reserve` answers 501 (`ServerState::blobs`)
+        // and `router()` sees `blobs: None`, so the §8.3.2 relay route is not
+        // mounted either. `Config::validate` says both at start-up.
         //
         // The backend is built exactly once here and the same `Arc` is handed
         // to both the store (which mints read URLs for `$blob` values on their
@@ -647,8 +648,9 @@ impl Server {
         );
 
         // Managed blobs are optional. A server with no blob signing key still
-        // runs every other path; `:reserve` answers 501 and the relay route is
-        // never mounted, which is honest and is what `validate` warns about.
+        // runs every other path; `:reserve` answers 501 (`ServerState::blobs`)
+        // and `router()` sees `blobs: None`, so the §8.3.2 relay route is not
+        // mounted either. `Config::validate` says both at start-up.
         //
         // When they are configured the dispatcher gets the same store, because
         // protocol §8.3.2 makes the op commit the point at which a `$blob` is

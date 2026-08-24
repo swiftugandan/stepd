@@ -21,7 +21,7 @@ memoisation, plus Restate-style keyed single-writer ordering, on Postgres.
 
 ```
 spec/        Wire protocol, JSON Schemas, validator
-rust/        The implementation: nine crates, migrations, SQL test suites
+rust/        The implementation: eleven crates, migrations, SQL test suites
 docs/        BRD, PRD, gap register, SDK design, ADRs, runbooks
 reference/   Python reference implementation — kept as an independent model
 ```
@@ -33,13 +33,14 @@ reference/   Python reference implementation — kept as an independent model
 | Protocol spec (rev 1.2) | Complete | 54 schema cases — `spec/validate.py` |
 | Postgres schema + engine SQL | Complete | 166 behavioural + 27 structural assertions |
 | `stepd-proto` | Complete | 36 tests |
-| `stepd-core` | Complete | 65 tests, in-memory fakes for every interface |
-| `stepd-store-postgres` | Complete | 11 unit + 23 live + the simulation harness |
+| `stepd-core` | Complete | 72 tests, in-memory fakes for every interface |
+| `stepd-store-postgres` | Complete | 16 unit + 25 live + the simulation harness |
 | `stepd-expr-cel` | Complete (documented subset) | 16 tests |
 | `stepd-transport-http` | Complete | 10 tests |
 | `stepd-sdk-core` | Complete | 32 tests — the R1 machinery |
-| `stepd-sdk` | Complete | 29 tests, including the workflow test harness |
-| `stepd-server` | Complete | 28 unit + 17 end-to-end |
+| `stepd-sdk` | Complete | 30 tests, including the workflow test harness |
+| `stepd-server` | Complete | 42 unit + 19 end-to-end |
+| `stepd-blobs-s3` | Complete | 8 offline + 6 live; the live ones need `STEPD_TEST_S3_*` |
 | `stepd-cli` | Complete | `serve` · `migrate` · `doctor` · `dev` · `token` · `run` · `limits` · `conformance` |
 | Cron scheduler | Complete | 37 unit + 47 SQL + 13 live + 3 e2e; simulation property P10 |
 | Cancellation compensation | Complete | migration 010; conformance `cancel` |
@@ -71,33 +72,47 @@ overstated the opposite way and that is how four defects sat undetected.
   carries a 256 KiB `$blob` and asserts that everything crossing the server's
   own socket, both directions, stayed under 32 KiB; `stepd-blobs-s3/tests/live.rs`
   checks the store's enforcement directly. Both skip loudly without
-  `STEPD_TEST_S3_*`, and no lane in `.github/workflows/ci.yml` sets it. So this
-  is evidence that exists and passes locally, and no evidence that is produced
-  automatically. `docs/blob-backends.md` records what MinIO
-  `RELEASE.2025-09-07T16-13-09Z` and RustFS `v1.0.0-beta.12` actually did when
-  probed — both reject a presigned PUT whose body does not match its signed
-  checksum, but RustFS is at release-candidate maturity and reports that
-  rejection under the wrong header name (`Content-Md5`), so its error text is
-  not a basis for any claim about which header it checked.
-* **Nothing would fail if the S3 backend started downloading objects again.**
-  `commit_blob` reads and hashes the bytes only in the arm where
-  `BlobBackend::stored` answers `sha256: None`, and `S3Backend::stored` errors
-  rather than answering `None` when the store reports no checksum. That pair is
-  the whole of what keeps digest verification off the control plane, and it is
-  structural: no test in either crate fails if it changes.
+  `STEPD_TEST_S3_*` — and the end-to-end one also needs
+  `STEPD_TEST_DATABASE_URL` — and no lane in `.github/workflows/ci.yml` sets
+  either for them. So this is evidence that exists and passes locally, and no
+  evidence that is produced automatically. `docs/blob-backends.md` records what
+  MinIO `RELEASE.2025-09-07T16-13-09Z` and RustFS `v1.0.0-beta.12` actually did
+  when probed — both reject a presigned PUT whose body does not match its signed
+  checksum, but RustFS is a beta release and reports that rejection under the
+  wrong header name (`Content-Md5`), so its error text is not a basis for any
+  claim about which header it checked.
+* **One regression in the S3 backend would escape every test.** If
+  `S3Backend::stored` were changed to fetch the object and hash it itself,
+  still returning `Some(digest)`, nothing would go red:
+  `a_committed_object_reports_its_digest_without_transferring_it` measures the
+  answer and not the transfer, and says so in its own comment; and
+  `no_object_bytes_reach_the_server_on_the_s3_path` counts bytes on the server's
+  client-facing socket, which server-to-store traffic never crosses. The
+  neighbouring regression is caught, twice: `stored` answering `None` — which
+  would route `commit_blob` into its read-and-hash arm — fails
+  `an_object_the_store_reports_no_checksum_for_is_an_error_not_a_fallback`, and
+  on a real deployment it fails the commit loudly anyway, because
+  `PostgresBlobStore::get_bytes` errors on a store built with `relay: None` and
+  that is how `Server::build` builds the S3 one. A narrow hole, then, recorded
+  because it is the one change that could put payload bytes back through the
+  control plane without a red build.
 * **A `$blob` that arrives outside an attempt envelope is still never
-  committed.** Protocol §8.3.4 names step results, run inputs and emitted
-  events. `Dispatcher::verify_blobs` walks an envelope's ops — which is where
-  the `invoke` and `continue_as_new` run inputs live — and its emitted events.
-  A `$blob` in an event ingested through `POST /v1/events` — which is what
-  becomes a run's input — or in a signal payload sent to
-  `POST /v1/runs/{id}/resolve-wait` reaches no `commit_blob` call anywhere:
+  verified.** §8.3.2 requires the server to check `size` and `sha256` before a
+  blob becomes readable. `Dispatcher::verify_blobs` does that for an envelope's
+  ops — which is where the `invoke` and `continue_as_new` run inputs live — and
+  its emitted events. A `$blob` in an event ingested through `POST /v1/events`,
+  which is what becomes a run's input, or in a signal payload sent to
+  `POST /v1/runs/{id}/resolve-wait`, reaches no `commit_blob` call anywhere:
   neither `api.rs` nor `ingest.rs` mentions blobs at all, and `commit_blob` has
   exactly two callers on the serving path — the dispatcher and the relay
-  endpoint. On a presigning backend such a row therefore stays
-  `reserved`, and the collector takes its bytes once the reservation window
-  (`STEPD_BLOB_RESERVATION_TTL_HOURS`, default 24) passes. That is the same
-  defect the op-commit verification fixed, at a different entry point.
+  endpoint. On a presigning backend such a row therefore stays `reserved`, and
+  the collector takes its bytes once the reservation window
+  (`STEPD_BLOB_RESERVATION_TTL_HOURS`, default 24) passes. §8.3.4, the
+  *reference* obligation, is a separate matter and is covered on every path —
+  `runs_record_blob_refs` in `migrations/0011_blob_refs.sql` fires on
+  `INSERT OR UPDATE OF input, output ON runs`, so an ingested event's blob does
+  get its `blob_refs` row. It is verification, not reference counting, that has
+  one entry point.
 * **`commit_blob` does no namespace check**, and neither does `attach_read_urls`
   or `presign_read` — all three look a blob up by id alone. Pre-existing, but
   op-commit is the first place an app-supplied blob id drives a
@@ -464,7 +479,7 @@ and skipped counts, and — if the sweep gave up on a schedule — why.
 | | |
 |---|---|
 | `spec/PROTOCOL.md` | The wire protocol. The thing a third party implements against — §12 now says what they must expose for the battery to run. |
-| `docs/adr/` | Twenty-two ADRs. Start with 011, 012 and 019 — the silent-corruption ones. ADR-016 records what building cron taught about ADR-016; 021 and 022 what the conformance suite found. |
+| `docs/adr/` | Twenty-three ADRs. Start with 011, 012 and 019 — the silent-corruption ones. ADR-016 records what building cron taught about ADR-016; 021 and 022 what the conformance suite found. |
 | `docs/runbooks/restore-hazard.md` | **Read before you need it.** A point-in-time restore re-executes side effects — and re-fires cron occurrences, which is section 3a. |
 | `docs/runbooks/` | Stuck runs, backlog, poison pills, upgrades. |
 | `docs/RECONCILIATION.md` | What was wrong with the archived tree, and what was done. |
@@ -483,9 +498,13 @@ and skipped counts, and — if the sweep gave up on a schedule — why.
    suite and the Rust SDK were written together and can share a misreading. An
    independent implementation reaching level 2 is the claim the protocol is
    actually making.
-4. **Run the CI lanes.** `.github/workflows/ci.yml` exists and has never
-   executed; the pgbouncer lane in particular turns "we only use row-level
-   locks" from an assertion into evidence.
+4. **Get the CI lanes green, and add one for the S3 backend.**
+   `.github/workflows/ci.yml` runs on every push; as of run `32688345824` four
+   of six lanes pass and two do not — `tier 3 · through pgbouncer (F-DL-1)`,
+   which is the lane that turns "we only use row-level locks" from an assertion
+   into evidence, and `tier 4 · soak (nightly)`. Nothing sets `STEPD_TEST_S3_*`
+   in any lane, so the managed-blob claim in *Honest gaps* above has no
+   automatic evidence behind it either.
 5. **Rehearse the restore runbook.** It is the document most likely to matter, a
    procedure nobody has practised takes hours and produces its decisions under
    pressure — and it just grew a cron section that has never been walked
@@ -493,4 +512,4 @@ and skipped counts, and — if the sweep gave up on a schedule — why.
 
 ## Licence
 
-Apache-2.0 intended (see PRD open question 6; not yet formally applied).
+Apache-2.0. Applied in `0d01e75`; the text is in `LICENSE` at the root.

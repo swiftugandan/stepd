@@ -4,7 +4,7 @@
 |---|---|
 | Date | 2026-08-23 |
 | Scope | The whole Rust workspace, reconciled against PRD §6.3, the protocol spec and `reference/` |
-| Outcome | Sixteen defects found and fixed; four crates written; the cron scheduler, the conformance battery and managed blobs built; the engine runs against a live database |
+| Outcome | Seventeen defects found and fixed; four crates written; the cron scheduler, the conformance battery and managed blobs built; the engine runs against a live database |
 
 This is the record of what the archived Rust tree actually was, what was wrong
 with it, and what was done. It exists because the README's provenance caveat was

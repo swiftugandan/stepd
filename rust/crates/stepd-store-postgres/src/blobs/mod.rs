@@ -218,9 +218,15 @@ impl PostgresBlobStore {
     /// Build a store whose bytes live wherever `backend` puts them, with no
     /// relay: the backend must presign, because [`PostgresBlobStore::put_bytes`]
     /// and [`PostgresBlobStore::get_bytes`] refuse every call without one.
-    /// `Server::router` mounts the §8.3.2 relay route only where
-    /// `can_presign()` is false, so on the server that refusal is unreachable —
-    /// the route is not there. It still matters for any other caller.
+    ///
+    /// That refusal is not dead weight on a presigning deployment, even though
+    /// `Server::router` never mounts the §8.3.2 relay route for one. There is a
+    /// second, in-process caller: [`BlobStore::commit_blob`]'s `stored() ==
+    /// None` arm calls `self.get_bytes(id, None)` to hash the object locally.
+    /// A backend that presigns but answered `None` would therefore fail the
+    /// commit here, loudly, rather than quietly pulling the payload back
+    /// through this process — which is the failure the whole S3 path exists to
+    /// avoid. Keep it that way.
     ///
     /// `caps` still verifies the capabilities on the server's transfer
     /// endpoints, independent of which backend is minting them.
