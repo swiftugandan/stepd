@@ -18,6 +18,7 @@ allow = [
     "Apache-2.0",         # the workspace's own licence, and most of the tree
     "MIT",                # the other half of the usual Rust dual licence
     "ISC",                # rustls-webpki, untrusted; also half of ring
+    "BSD-2-Clause",       # rusty-s3, the SigV4 signer behind the S3 blob backend
     "BSD-3-Clause",       # subtle; also half of matchit
     "Zlib",               # foldhash
     "Unicode-3.0",        # the icu/zerovec family, and half of unicode-ident

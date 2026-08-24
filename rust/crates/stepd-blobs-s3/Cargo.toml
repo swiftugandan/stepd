@@ -1,6 +1,6 @@
 [package]
-name = "stepd-transport-http"
-description = "Signed HTTP push transport for stepd, with the egress policy that keeps an app-supplied URL from reaching cloud metadata."
+name = "stepd-blobs-s3"
+description = "S3-compatible blob backend: presigned upload and download, digest verified by the object store."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,15 +8,15 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-stepd-proto.workspace = true
 stepd-core.workspace = true
-serde_json.workspace = true
 async-trait.workspace = true
-reqwest.workspace = true
-uuid.workspace = true
 chrono.workspace = true
-tracing.workspace = true
+uuid.workspace = true
+reqwest.workspace = true
+hex.workspace = true
+base64.workspace = true
 url.workspace = true
+rusty-s3.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

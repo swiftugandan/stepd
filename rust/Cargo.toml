@@ -4,6 +4,7 @@ members = [
   "crates/stepd-proto",
   "crates/stepd-core",
   "crates/stepd-store-postgres",
+  "crates/stepd-blobs-s3",
   "crates/stepd-sdk-core",
   "crates/stepd-sdk",
   "crates/stepd-expr-cel",
@@ -24,6 +25,7 @@ rust-version = "1.85"   # Waker::noop, used by the SDK test harness so a workflo
 stepd-proto = { path = "crates/stepd-proto", version = "0.1.0" }
 stepd-core  = { path = "crates/stepd-core",  version = "0.1.0" }
 stepd-store-postgres = { path = "crates/stepd-store-postgres", version = "0.1.0" }
+stepd-blobs-s3 = { path = "crates/stepd-blobs-s3", version = "0.1.0" }
 stepd-sdk-core = { path = "crates/stepd-sdk-core", version = "0.1.0" }
 stepd-sdk    = { path = "crates/stepd-sdk",  version = "0.1.0" }
 stepd-server = { path = "crates/stepd-server", version = "0.1.0" }
@@ -55,6 +57,15 @@ rand       = "0.8"
 humantime  = "2"
 futures    = "0.3"
 tempfile   = "3"
+base64     = "0.22"
+url        = "2"
+# Sans-IO SigV4 signer for the S3 blob backend. It sends nothing itself, which
+# is why presigning a read URL can stay synchronous. Only the signer is wanted,
+# so the default `full` feature set is off: it pulls an XML parser, an MD5
+# implementation and serde for API surface this workspace never calls, and each
+# one is another licence to justify in `deny.toml`. `rustcrypto` is the crypto
+# backend; without one of the three the crate refuses to compile at all.
+rusty-s3   = { version = "0.10", default-features = false, features = ["rustcrypto"] }
 
 [profile.release]
 lto = "thin"

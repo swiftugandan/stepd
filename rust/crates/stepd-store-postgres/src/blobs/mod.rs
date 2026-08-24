@@ -258,6 +258,15 @@ impl PostgresBlobStore {
         self.backend.can_presign()
     }
 
+    /// The backend's short name, for logs and diagnostics.
+    ///
+    /// A passthrough to [`BlobBackend::name`], for the same reason
+    /// [`PostgresBlobStore::can_presign`] is one: the server decides what to
+    /// mount and what to say about it without naming a concrete backend type.
+    pub fn backend_name(&self) -> &'static str {
+        self.backend.name()
+    }
+
     /// Override the single-blob ceiling.
     pub fn with_max_size(mut self, bytes: i64) -> Self {
         self.max_size = bytes;
@@ -646,6 +655,9 @@ mod tests {
         fn can_presign(&self) -> bool {
             true
         }
+        fn name(&self) -> &'static str {
+            "stub"
+        }
     }
 
     #[test]
@@ -694,6 +706,9 @@ mod tests {
         }
         fn can_presign(&self) -> bool {
             true
+        }
+        fn name(&self) -> &'static str {
+            "failing-stub"
         }
     }
 
