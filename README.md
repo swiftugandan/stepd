@@ -43,7 +43,7 @@ reference/   Python reference implementation — kept as an independent model
 | `stepd-cli` | Complete | `serve` · `migrate` · `doctor` · `dev` · `token` · `run` · `limits` · `conformance` |
 | Cron scheduler | Complete | 37 unit + 47 SQL + 13 live + 3 e2e; simulation property P10 |
 | Cancellation compensation | Complete | migration 010; conformance `cancel` |
-| Managed blobs | Complete | two-phase upload, `Range`, dedupe, reference tracking |
+| Managed blobs | Complete — filesystem (relay) and S3 (presigned) | two-phase upload, `Range`, dedupe, reference tracking; the S3 suites need `STEPD_TEST_S3_*` and nothing automatic sets it |
 | Subject erasure | **Schema only** | see below |
 | Conformance suite | Complete | 19 suites, 28 cases; the reference app reaches **level 2** |
 
@@ -61,11 +61,49 @@ overstated the opposite way and that is how four defects sat undetected.
 * **Circuit-breaker state is not in the API.** Breakers are per-replica and in
   memory. `/v1/functions` reports observable failure counts rather than a value
   that would be confidently wrong.
-* **The blob relay is the fallback path, not the fast one.** The bundled
-  filesystem store cannot presign, so §8.3.2's compatibility relay applies and
-  bytes go through the server. It warns every time. An S3-backed store
-  implementing the same trait removes that hop without anything above it
-  changing — but nobody has written one.
+* **BR-19 on the S3 path is proved by tests nothing runs automatically.**
+  `STEPD_BLOB_BACKEND=s3` presigns the upload with `x-amz-checksum-sha256` and
+  `content-length` bound into the SigV4 signature, so the object store rejects
+  mismatched bytes itself and the server issues only `HeadObject` and
+  `DeleteObject` against it — it never transfers an object.
+  `no_object_bytes_reach_the_server_on_the_s3_path`
+  (`stepd-server/tests/end_to_end.rs`) drives a real run whose step result
+  carries a 256 KiB `$blob` and asserts that everything crossing the server's
+  own socket, both directions, stayed under 32 KiB; `stepd-blobs-s3/tests/live.rs`
+  checks the store's enforcement directly. Both skip loudly without
+  `STEPD_TEST_S3_*`, and no lane in `.github/workflows/ci.yml` sets it. So this
+  is evidence that exists and passes locally, and no evidence that is produced
+  automatically. `docs/blob-backends.md` records what MinIO
+  `RELEASE.2025-09-07T16-13-09Z` and RustFS `v1.0.0-beta.12` actually did when
+  probed — both reject a presigned PUT whose body does not match its signed
+  checksum, but RustFS is at release-candidate maturity and reports that
+  rejection under the wrong header name (`Content-Md5`), so its error text is
+  not a basis for any claim about which header it checked.
+* **Nothing would fail if the S3 backend started downloading objects again.**
+  `commit_blob` reads and hashes the bytes only in the arm where
+  `BlobBackend::stored` answers `sha256: None`, and `S3Backend::stored` errors
+  rather than answering `None` when the store reports no checksum. That pair is
+  the whole of what keeps digest verification off the control plane, and it is
+  structural: no test in either crate fails if it changes.
+* **A `$blob` that arrives outside an attempt envelope is still never
+  committed.** Protocol §8.3.4 names step results, run inputs and emitted
+  events. `Dispatcher::verify_blobs` walks an envelope's ops — which is where
+  the `invoke` and `continue_as_new` run inputs live — and its emitted events.
+  A `$blob` in an event ingested through `POST /v1/events` — which is what
+  becomes a run's input — or in a signal payload sent to
+  `POST /v1/runs/{id}/resolve-wait` reaches no `commit_blob` call anywhere:
+  neither `api.rs` nor `ingest.rs` mentions blobs at all, and `commit_blob` has
+  exactly two callers on the serving path — the dispatcher and the relay
+  endpoint. On a presigning backend such a row therefore stays
+  `reserved`, and the collector takes its bytes once the reservation window
+  (`STEPD_BLOB_RESERVATION_TTL_HOURS`, default 24) passes. That is the same
+  defect the op-commit verification fixed, at a different entry point.
+* **`commit_blob` does no namespace check**, and neither does `attach_read_urls`
+  or `presign_read` — all three look a blob up by id alone. Pre-existing, but
+  op-commit is the first place an app-supplied blob id drives a
+  `reserved → committed` transition on a row the app may not own. Substituting
+  content is a separate matter and remains impossible: the digest is fixed at
+  reservation and is what the commit checks against.
 * **The SDK does not enforce the compensation path.** A handler that declares
   `on_cancel` and ignores `ctx.run().cancelling` will re-run its normal work.
   The protocol says the SDK runs only the compensation path; the Rust SDK exposes
@@ -278,10 +316,28 @@ cargo run -p stepd-cli -- doctor         # thirteen checks; non-zero exit on any
 `stepd serve` — `serve` refuses to start without a signing key rather than
 sending every attempt unsigned.
 
-Managed blobs need `STEPD_BLOB_SIGNING_KEY`, `STEPD_BLOB_ROOT` and
-`STEPD_BLOB_BASE_URL`. Without the key the two transfer endpoints answer 501 and
-say why: a capability signed with a default key verifies for anyone who guesses
-it, and the failure would be silent, so there is no default.
+Managed blobs need `STEPD_BLOB_SIGNING_KEY`. Without it `POST /v1/blobs:reserve`
+answers 501 and says why: a capability signed with a default key verifies for
+anyone who guesses it, and the failure would be silent, so there is no default.
+
+`STEPD_BLOB_BACKEND` chooses where the bytes live. It is read case- and
+whitespace-insensitively; anything other than `fs` or `s3` warns and falls back
+to `fs` rather than guessing silently.
+
+| | |
+|---|---|
+| `fs` *(default)* | `STEPD_BLOB_ROOT` (default `/var/lib/stepd/blobs`) and `STEPD_BLOB_BASE_URL`. A filesystem cannot presign, so §8.3.2's compatibility relay is mounted and every payload byte crosses this process — warned once at start-up and again on every relayed upload. This is what makes `stepd dev` work with no cloud account. |
+| `s3` | `STEPD_BLOB_S3_ENDPOINT`, `STEPD_BLOB_S3_BUCKET`, `STEPD_BLOB_S3_ACCESS_KEY`, `STEPD_BLOB_S3_SECRET_KEY`, plus optional `STEPD_BLOB_S3_REGION` (default `us-east-1`) and `STEPD_BLOB_S3_PATH_STYLE`. `serve` refuses to start if any of the four required ones is missing, naming them: a half-configured S3 backend would hand apps upload URLs pointing at nothing. The relay route is not mounted, and `doctor` gains a fourteenth check that probes the bucket with these credentials. |
+
+`STEPD_BLOB_MAX_SIZE` and `STEPD_BLOB_RESERVATION_TTL_HOURS` (default 24) apply
+to either. `STEPD_BLOB_ROOT` and `STEPD_BLOB_BASE_URL` do nothing on `s3`; the
+`STEPD_BLOB_S3_*` variables do nothing on `fs`.
+
+The `s3` backend's safety rests on the object store rejecting a presigned PUT
+whose body does not match the `x-amz-checksum-sha256` bound into its signature —
+not every S3-compatible server does. [`docs/blob-backends.md`](docs/blob-backends.md)
+records what MinIO and RustFS were actually observed to do, and the caveats on
+each. Read it before pointing this at a third server.
 
 ### Running with Docker
 
@@ -366,10 +422,14 @@ let receipt: Blob = ctx.step("receipt", || async {
 let header = blobs.read_range(&receipt, 0, 1023).await?;
 ```
 
-Bytes never pass through the server on the way in: the app reserves, uploads
-directly, and hands back a reference. Reading is lazy and the reference is a
-value — replaying a run with forty blob-bearing steps decodes forty references
-and downloads nothing.
+The app reserves, uploads to the URL it was handed, and returns a reference. On
+the `s3` backend that URL addresses the object store directly, signed with the
+store's own credentials, so the bytes never pass through the server on the way
+in; on the default `fs` backend it points
+back here and they do — that is §8.3.2's compatibility relay, and it is why the
+backend is a configuration choice rather than a detail. Either way reading is
+lazy and the reference is a value, so replaying a run with forty blob-bearing
+steps decodes forty references and downloads nothing.
 
 Uploading inside a step is what records the reference in the journal, which is
 what keeps the bytes alive. Content addressing means a retry that re-reserves the
@@ -409,6 +469,7 @@ and skipped counts, and — if the sweep gave up on a schedule — why.
 | `docs/runbooks/` | Stuck runs, backlog, poison pills, upgrades. |
 | `docs/RECONCILIATION.md` | What was wrong with the archived tree, and what was done. |
 | `docs/GAPS.md` | The gap register. |
+| `docs/blob-backends.md` | Which S3-compatible servers were observed to enforce a signed upload checksum, and what each one's rejection actually looked like. Read before choosing a store for `STEPD_BLOB_BACKEND=s3`. |
 | `docs/SDK-DESIGN-rust.md` | The two mechanisms that carry all the SDK's risk. |
 
 ## Next steps, in order

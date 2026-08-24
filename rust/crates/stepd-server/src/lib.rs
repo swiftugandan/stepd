@@ -454,10 +454,12 @@ fn blob_backend_from(lookup: impl Fn(&str) -> Option<String>) -> BlobBackendConf
         }),
         other => {
             // Unset, or explicitly "fs", is the ordinary default. Anything
-            // else ("minio", "aws", a trailing space) is almost certainly a
-            // typo rather than a considered choice: silently keeping the
-            // filesystem default would mean every `STEPD_BLOB_S3_*` variable
-            // the operator set is ignored with no diagnostic at all —
+            // else ("minio", "aws", "s3://…") is almost certainly a typo
+            // rather than a considered choice — case and surrounding
+            // whitespace are normalised above, so those spellings never reach
+            // here. Silently keeping the filesystem default would mean every
+            // `STEPD_BLOB_S3_*` variable the operator set is ignored with no
+            // diagnostic at all —
             // `parse_bool_by_value` above already warns on an unrecognised
             // value, so this matches that precedent rather than being the one
             // place in this function that guesses silently.
@@ -552,8 +554,8 @@ impl Server {
         let mut store =
             PostgresStore::connect(&config.database_url, config.max_connections).await?;
         // Managed blobs are optional. A server with no blob signing key still
-        // runs every other path; it simply refuses the two transfer endpoints,
-        // which is honest and is what the doctor reports.
+        // runs every other path; `:reserve` answers 501 and the relay route is
+        // never mounted, which is honest and is what `validate` warns about.
         //
         // The backend is built exactly once here and the same `Arc` is handed
         // to both the store (which mints read URLs for `$blob` values on their
@@ -645,8 +647,8 @@ impl Server {
         );
 
         // Managed blobs are optional. A server with no blob signing key still
-        // runs every other path; it simply refuses the two transfer endpoints,
-        // which is honest and is what the doctor reports.
+        // runs every other path; `:reserve` answers 501 and the relay route is
+        // never mounted, which is honest and is what `validate` warns about.
         //
         // When they are configured the dispatcher gets the same store, because
         // protocol §8.3.2 makes the op commit the point at which a `$blob` is
@@ -701,9 +703,14 @@ impl Server {
             .map(|b| (b.backend_name(), !b.can_presign()));
         let relay = backend.map(|(_, r)| r).unwrap_or(false);
 
-        // Once per serving process, naming the backend — not per request,
+        // Once per `Server` instance, naming the backend — not per request,
         // where this warning already fires too (`blobs.rs`'s
-        // `write_content`). A start-up line alone would not tell an operator
+        // `write_content`). Per instance, not per process: the guard is
+        // `blob_relay_warned`, an `AtomicBool` on this `Server`. Every current
+        // caller builds one `Server` per process, so today that is the same
+        // line count, but a process holding two (as the test fixtures do)
+        // would log one each — deliberately, since they may be on different
+        // backends. A start-up line alone would not tell an operator
         // the fallback is still in use at three in the morning; a
         // per-request line alone would not tell them their deployment is on
         // the fallback path at all. §8.3.2 calls the relay a compatibility
@@ -982,10 +989,12 @@ mod tests {
 
     #[test]
     fn an_unrecognised_blob_backend_falls_back_to_the_filesystem_rather_than_hanging() {
-        // "minio", "aws", a trailing space — none of these should silently
-        // drop every STEPD_BLOB_S3_* variable an operator set with no
-        // diagnostic. This asserts only the fallback; the warning itself
-        // needs a tracing subscriber this test binary does not install.
+        // "minio", "aws", "s3://…" — none of these should silently drop every
+        // STEPD_BLOB_S3_* variable an operator set with no diagnostic. Not a
+        // trailing space, which `blob_backend_from` trims before matching;
+        // `blob_backend_is_read_case_and_whitespace_insensitively` below is
+        // the test for that. This asserts only the fallback; the warning
+        // itself needs a tracing subscriber this test binary does not install.
         assert!(matches!(
             blob_backend_from(lookup(&[("STEPD_BLOB_BACKEND", "minio")])),
             BlobBackendConfig::Filesystem { .. }

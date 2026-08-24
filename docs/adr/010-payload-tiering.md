@@ -32,14 +32,18 @@ accommodate the few that are not is a bad trade for the many that are.
 | Managed blob | 1–100 MiB | blob store, `$blob` reference in the result | stepd, refcounted |
 | External `$ref` | > 100 MiB | wherever the application already keeps them | the application |
 
-**Bulk data never traverses the stepd server.** Managed blobs use a two-phase direct upload
+**Bulk data does not traverse the stepd server.** Managed blobs use a two-phase direct upload
 (§8.3.2): the app reserves (`BlobStore::reserve`, declaring size, SHA-256 and content type),
-PUTs the bytes straight to the store, then returns `{"$blob": {...}}` in the step result.
-The server sees the digest, never the bytes.
+PUTs the bytes to the URL it is handed, then returns `{"$blob": {...}}` in the step result.
+On a backend that presigns — `stepd-blobs-s3` — that URL addresses the object store and the
+server sees the digest, never the bytes. The bundled filesystem backend cannot sign anything,
+so §8.3.2's compatibility relay applies to it and the bytes do cross this process; that is a
+deliberate exception, it is warned about, and it is what makes `stepd dev` work with no cloud
+account.
 
 **The upload and read URLs are signed capabilities, and the MAC covers the whole
-capability.** `Capability::sign` in `rust/crates/stepd-store-postgres/src/blobs.rs` HMACs
-`"{id}.{dir}.{size}.{expires}"`. Every field is load-bearing:
+capability.** `Capability::sign` in `rust/crates/stepd-store-postgres/src/blobs/mod.rs`
+HMACs `"{id}.{dir}.{size}.{expires}"`. Every field is load-bearing:
 
 * `id` — a leaked URL cannot be pointed at another blob.
 * `dir` — a write capability cannot be replayed as a read. This is the difference between a
@@ -50,13 +54,18 @@ capability.** `Capability::sign` in `rust/crates/stepd-store-postgres/src/blobs.
   (`subtle::ConstantTimeEq`), because a byte-by-byte compare leaks the correct prefix.
 
 A session cookie expresses none of that, and the app holding an upload URL may hold no
-console token at all.
+console token at all. This capability is what authorises a transfer *through the server* —
+the §8.3.2 relay. A backend that presigns mints its own URL instead, with the same
+properties carried by its own signature: `stepd-blobs-s3` signs the object key, the method,
+the declared length and the digest, and the URL expires.
 
-**Content is verified before the blob becomes readable.** `commit_blob` re-reads the stored
-bytes, compares length and SHA-256 against what was declared, and only then sets
-`state='committed'`. Without it a compromised upload URL used in time could substitute
-different content for a reference already committed into a step result, and every later read
-would return the substituted bytes with nothing indicating a change.
+**Content is verified before the blob becomes readable.** `commit_blob` asks the backend
+what it holds (`BlobBackend::stored`), compares length and SHA-256 against what was declared,
+and only then sets `state='committed'`. Without it a compromised upload URL used in time
+could substitute different content for a reference already committed into a step result, and
+every later read would return the substituted bytes with nothing indicating a change. Which
+call answers "and what is its digest" is the backend's business: object storage reads it from
+metadata the store computed itself, the filesystem has no metadata and reads the bytes.
 
 **Content addressing is per namespace, never global.** `UNIQUE (ns, sha256)` on `blobs`
 (`rust/migrations/0001_initial.sql`); `reserve` looks up `WHERE ns=$1 AND sha256=$2`. A
@@ -76,13 +85,30 @@ verification, URL minting and deletion (§8.5).
 ## Consequences
 
 ### What this makes easy
-* Control-plane throughput is independent of payload size: a tenant moving 100 GiB of video
-  moves none of it through stepd.
+* Control-plane throughput is independent of payload size **on a presigning backend**: a
+  tenant moving 100 GiB of video through an S3 store moves none of it through stepd. On the
+  filesystem backend the relay applies and this does not hold — which is why the backend is
+  an operator's configuration choice and not an implementation detail.
 * Replay stays cheap — a run with forty blob-bearing steps re-downloads nothing on attempt
   forty-one, because SDKs dereference lazily (§8.3.3).
-* Swapping the backend is a `BlobStore` implementation: `PostgresBlobStore` indexes in
-  Postgres and writes bytes to a filesystem root, which is what makes `stepd dev` work with
-  no cloud account, and S3 is a drop-in.
+* Swapping where bytes live is a `BlobBackend` implementation: `PostgresBlobStore` keeps the
+  index in Postgres — the row, the per-namespace dedupe, the `blob_refs` recorded by trigger,
+  collection — and the backend owns the bytes and the URLs. `FilesystemBackend` writes to a
+  local root, which is what makes `stepd dev` work with no cloud account; `stepd-blobs-s3`
+  presigns against an object store.
+
+  This ADR originally said "S3 is a drop-in", and that is what made the work look small. It
+  was not one. `BlobStore` mixed the index with byte transfer, so a second implementation
+  would have duplicated the correctness-bearing half to change the mechanical one. Four
+  things had to move before an S3 backend was correct rather than merely present:
+  `BlobBackend` had to be split out of `BlobStore`; raw transfer had to move to a separate
+  `RelayBytes` trait, so a presigning backend is *unable* to answer the relay's methods
+  rather than merely not asked to; `Server::router` had to stop mounting the §8.3.2 route
+  when `can_presign()` is true, since an unused route that accepts bytes is a second way in;
+  and `Dispatcher::commit` had to start verifying `$blob` references at op-commit, because on
+  a presigning backend nothing else in the tree calls `commit_blob` at all — without it the
+  rows stayed `reserved` and the collector took their bytes 24 hours later. A seam described
+  in a sentence is not a seam that exists.
 * The signing rules are testable with nothing running — `Capability` holds no pool and no
   runtime, so its four tests need no database.
 
@@ -93,38 +119,65 @@ verification, URL minting and deletion (§8.5).
   only GC cleans up.
 
 ### What we accept
-* **The blob HTTP surface is not yet wired.** `rust/crates/stepd-server/src/api.rs` exposes
-  neither `POST /v1/blobs:reserve` nor `PUT /v1/blobs/{id}/content`. The store, the
-  capability minter, the schema and the `doctor` check all exist; the endpoints that would
-  let an app use them do not. The decision is settled, the wiring is outstanding.
-* Digest verification reads the whole object back on commit — a local read on the filesystem
-  backend, a full download on S3 unless the store's own checksum headers are used. A real
-  cost, and the reason the ceiling is 100 MiB.
+* Digest verification costs a whole-object read **on the filesystem backend**, which has no
+  metadata to consult and so reaches `commit_blob`'s `stored() == None` arm and hashes the
+  bytes. That is the real cost, and the reason the ceiling is 100 MiB. On S3 it does not
+  apply: the presigned PUT binds `x-amz-checksum-sha256` and `content-length` into the
+  signature, so the store rejects mismatched bytes itself and `stored` answers from a
+  `HeadObject`. The server issues only `HeadObject` and `DeleteObject` against an object
+  store; it never transfers an object.
+* **Nothing tests that.** What keeps the download out of the S3 path is structural — the
+  download lives only in the `stored() == None` arm, and `S3Backend::stored` errors rather
+  than returning `None` when the store reports no checksum — and no test in either crate
+  fails if that changes. `no_object_bytes_reach_the_server_on_the_s3_path` counts bytes on
+  the server's client-facing socket, which a server-to-store download would not touch.
+* **§8.3.4 is covered at one entry point, not everywhere.** `Dispatcher::commit` verifies the
+  `$blob` references in an attempt envelope's ops and emitted events — which includes the
+  `invoke` and `continue_as_new` run inputs. A `$blob` arriving in an ingested event or a
+  `resolve-wait` payload reaches no `commit_blob` call, so on a presigning backend its row
+  stays `reserved` and the collector takes the bytes after the reservation window.
+* **`commit_blob` performs no namespace check**, and neither does `attach_read_urls` or
+  `presign_read` — a blob is looked up by id alone. Op-commit is the first place an
+  app-supplied id drives a `reserved → committed` transition, so this is the first place it
+  matters. Content substitution stays impossible regardless: the digest is fixed at
+  reservation and is what the commit checks.
 * Reference counting is only as correct as the walk populating `blob_refs`: a blob referenced
   from somewhere `blob_ids` does not reach is collected while still referenced.
 * `Capability` uses one key for every namespace, so rotating it invalidates every outstanding
   URL at once. Per-namespace keys would confine that, at the cost of a key schedule.
+* The S3 backend depends on the object store enforcing a checksum it signed, and not every
+  S3-compatible server does. `docs/blob-backends.md` records what MinIO
+  `RELEASE.2025-09-07T16-13-09Z` and RustFS `v1.0.0-beta.12` were observed to do — both
+  reject a mismatched body, but RustFS is at release-candidate maturity and names the wrong
+  header (`Content-Md5`) when it does.
 
 ## Alternatives considered
 
 | Option | Why not |
 |---|---|
 | One tier: everything inline | Toasted values, journals exceeding the attempt body limit, and a database sized by customer payloads rather than workflow count. |
-| Upload through the server | Control-plane throughput becomes a function of payload size. Kept only as `relay_put`, for stores that cannot presign, with a warning metric (F-BLB-13). |
-| Presign with the object store's own signer | Ties the capability's shape to each backend's signer, and none binds the *reserved size*. A store-native signer stays available inside a `BlobStore` implementation. |
+| Upload through the server | Control-plane throughput becomes a function of payload size. Kept only as `RelayBytes` (`put_bytes`/`get_bytes`), for stores that cannot presign, warned about at start-up and on every relayed upload (F-BLB-13). |
+| Presign with the object store's own signer | Rejected as *the* mechanism: it ties the capability's shape to each backend's signer. Kept as an option inside a backend, which is what `stepd-blobs-s3` now is — and the concern this row raised, that a store-native signer would not bind the reserved size, turned out not to hold for SigV4, which binds `content-length` and `x-amz-checksum-sha256` when they are signed headers. |
 | Sign only the blob id | A leaked write URL becomes a read URL for the same object, and can store more than was reserved. Each field in the MAC removes a specific attack. |
 | Global content addressing | A cross-tenant existence oracle: reserve a digest, observe whether the upload was skipped. |
 | Verify the digest on first read | The reference is committed into a step result by then, so the run has proceeded on a value the server never checked. |
 
 ## Verification
 
-* `rust/crates/stepd-store-postgres/src/blobs.rs`: `a_write_capability_cannot_be_replayed_as_a_read`
+* `rust/crates/stepd-store-postgres/src/blobs/mod.rs`: `a_write_capability_cannot_be_replayed_as_a_read`
   (a `write` signature fails verification as `read`) and
   `a_capability_is_bound_to_one_blob_and_one_size` (substituting the id or the declared size
   fails, "or a write URL uploads more than was reserved").
-* Same file: `an_expired_capability_is_refused_even_with_a_valid_mac`,
-  `a_minted_url_verifies_against_its_own_signature`, and
-  `blob_paths_shard_and_stay_under_the_root` with `is_within`, against path traversal.
+* Same file: `an_expired_capability_is_refused_even_with_a_valid_mac` and
+  `a_minted_url_verifies_against_its_own_signature`. Also in that file, and not tests:
+  `reserve` scopes the digest lookup by namespace and carries the comment on the probing
+  attack; `commit_blob` checks size and digest before `state='committed'`, returning
+  `blob_digest_mismatch`; `collect` deletes bytes before rows.
+* `rust/crates/stepd-store-postgres/src/blobs/filesystem.rs`, the backend behind
+  `stepd dev`: `blob_paths_shard_and_stay_under_the_root` with `is_within`, against path
+  traversal; `a_stored_object_reports_its_size_but_not_a_digest` (the `None` that sends
+  `commit_blob` down the read-and-hash arm); `a_missing_object_is_absent_rather_than_an_error`;
+  `the_filesystem_backend_admits_it_cannot_presign`.
 * `rust/crates/stepd-core/src/blobs.rs`, where the reference walk now lives so the engine and
   the store share one: `blob_references_are_found_wherever_they_are_nested` (a `$blob` inside
   an array inside an object is found — what the reference count depends on).
@@ -134,10 +187,45 @@ verification, URL minting and deletion (§8.5).
   `an_already_committed_blob_reference_commits_normally`, whose store-side counterpart is
   `committing_an_already_committed_blob_does_not_look_at_the_object_again` in
   `rust/crates/stepd-store-postgres/tests/live.rs`.
-* Same module: `reserve` scopes the digest lookup by namespace and carries the comment on the
-  probing attack; `commit_blob` checks size and digest before `state='committed'`, returning
-  `blob_digest_mismatch`; `collect` deletes bytes before rows.
+* Read URLs come from the backend, not from the relay capability:
+  `read_urls_are_minted_by_the_backend_not_by_the_relay_capability`,
+  `a_read_url_failure_on_one_reference_does_not_stop_the_walk` and
+  `a_read_url_failure_clears_any_preexisting_url_rather_than_leaving_it` (the last because a
+  stale `url` left in place would be trusted by a range read that verifies nothing), all in
+  `rust/crates/stepd-store-postgres/src/blobs/mod.rs`.
+* The relay route exists only where it is needed:
+  `a_presigning_backend_does_not_expose_the_relay_route` in
+  `rust/crates/stepd-server/tests/end_to_end.rs`, and the same 404 asserted against a real S3
+  backend inside `no_object_bytes_reach_the_server_on_the_s3_path`.
+* `rust/crates/stepd-blobs-s3/src/lib.rs`, offline: `an_upload_target_binds_the_digest_and_the_length`,
+  `the_declared_digest_is_sent_base64_not_hex`,
+  `a_checksum_read_back_from_metadata_is_the_digest_that_was_declared`,
+  `objects_are_keyed_by_blob_id_rather_than_by_digest` (keying by digest would make
+  collection delete another namespace's bytes), `an_expired_ttl_is_refused_rather_than_signed`,
+  `neither_the_config_nor_the_backend_prints_its_secret_key`,
+  `the_s3_backend_presigns_and_says_which_backend_it_is`, and
+  `a_bucket_check_against_nothing_listening_is_unreachable_not_a_panic`.
+* `rust/crates/stepd-server/src/lib.rs`, for configuration: `the_default_blob_backend_is_the_filesystem`,
+  `selecting_s3_without_a_bucket_is_refused_rather_than_defaulted`,
+  `selecting_s3_with_no_endpoint_is_refused_rather_than_silently_accepted`,
+  `selecting_s3_with_no_credentials_is_also_refused`, `a_fully_configured_s3_backend_validates`,
+  `blob_backend_is_read_case_and_whitespace_insensitively`, and
+  `an_unrecognised_blob_backend_falls_back_to_the_filesystem_rather_than_hanging`.
+* **Against a live object store, and only where one is configured.**
+  `rust/crates/stepd-blobs-s3/tests/live.rs` —
+  `the_store_refuses_bytes_that_do_not_match_the_declared_digest`,
+  `a_client_cannot_swap_the_checksum_for_one_matching_its_own_bytes`,
+  `an_object_the_store_reports_no_checksum_for_is_an_error_not_a_fallback`,
+  `a_committed_object_reports_its_digest_without_transferring_it`,
+  `a_presigned_read_serves_a_range`, `deleting_an_object_is_idempotent` — and
+  `no_object_bytes_reach_the_server_on_the_s3_path` in
+  `rust/crates/stepd-server/tests/end_to_end.rs`, which drives a real run through a real SDK
+  app and asserts that everything crossing the server's own socket stayed under 32 KiB while
+  a 256 KiB payload reached the object store. All of these skip loudly without
+  `STEPD_TEST_S3_*`, and no lane in `.github/workflows/ci.yml` sets it: this is evidence that
+  passes locally and evidence nothing produces automatically.
 * `rust/migrations/0001_initial.sql`: `blobs` carries `UNIQUE (ns, sha256)` commented "dedupe
   within a tenant, never across"; `blob_refs` is keyed `(blob_id, run_id, step_hash)`.
 * `spec/PROTOCOL.md` §8 is the normative statement; `rust/crates/stepd-cli/src/doctor.rs`
-  reports reservations older than 24 h as bytes nothing references.
+  reports reservations older than 24 h as bytes nothing references, and on an S3 backend adds
+  a probe that the bucket answers with the configured credentials.

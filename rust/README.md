@@ -169,19 +169,41 @@ production. For a real deployment set `STEPD_DATABASE_URL` and
 `STEPD_SIGNING_KEY`, then `stepd migrate` and `stepd serve` — `serve` refuses to
 start without a signing key rather than sending every attempt unsigned.
 
-Managed blobs additionally need `STEPD_BLOB_SIGNING_KEY`, `STEPD_BLOB_ROOT` and
-`STEPD_BLOB_BASE_URL`. Without the key the two transfer endpoints answer 501 and
-say why: a capability signed with a default key verifies for anyone who guesses
-it, so there is no default.
+Managed blobs additionally need `STEPD_BLOB_SIGNING_KEY`. Without it
+`POST /v1/blobs:reserve` answers 501 and says why: a capability signed with a
+default key verifies for anyone who guesses it, so there is no default.
+
+`STEPD_BLOB_BACKEND` selects where the bytes live — `fs` (the default) or `s3`,
+matched after trimming and lowercasing, with anything else warning and falling
+back to `fs`.
+
+* `fs` takes `STEPD_BLOB_ROOT` (default `/var/lib/stepd/blobs`) and
+  `STEPD_BLOB_BASE_URL`. It cannot presign, so `Server::router` mounts §8.3.2's
+  relay route and warns — bytes cross this process on every upload.
+* `s3` takes `STEPD_BLOB_S3_ENDPOINT`, `STEPD_BLOB_S3_BUCKET`,
+  `STEPD_BLOB_S3_ACCESS_KEY` and `STEPD_BLOB_S3_SECRET_KEY`, all four required,
+  plus `STEPD_BLOB_S3_REGION` (default `us-east-1`) and
+  `STEPD_BLOB_S3_PATH_STYLE`. `Config::validate_blob_backend` runs before the
+  database connection is opened, so a missing one fails startup naming the
+  variable. The relay route is not mounted and `doctor` gains a bucket-reachable
+  check. See [`docs/blob-backends.md`](../docs/blob-backends.md) for which
+  object stores were observed to enforce the signed upload checksum this backend
+  depends on.
 
 Everything `Config::from_env` reads: `STEPD_DATABASE_URL` · `STEPD_BIND` ·
 `STEPD_SIGNING_KEY` · `STEPD_SIGNING_KEY_PREVIOUS` · `STEPD_WORKER` ·
 `STEPD_BATCH` · `STEPD_LEASE_SECONDS` · `STEPD_ATTEMPT_TIMEOUT_SECONDS` ·
 `STEPD_IDLE_POLL_MS` · `STEPD_TIMER_JITTER_SECONDS` · `STEPD_MAX_CONNECTIONS` ·
-`STEPD_LOG` · `STEPD_LOG_JSON` · `STEPD_ALLOW_LOOPBACK_EGRESS` ·
-`STEPD_ALLOW_PRIVATE_EGRESS` · `STEPD_EGRESS_ALLOWLIST` · `STEPD_BLOB_SIGNING_KEY` ·
+`STEPD_ALLOW_LOOPBACK_EGRESS` · `STEPD_ALLOW_PRIVATE_EGRESS` ·
+`STEPD_EGRESS_ALLOWLIST` · `STEPD_BLOB_SIGNING_KEY` · `STEPD_BLOB_BACKEND` ·
 `STEPD_BLOB_ROOT` · `STEPD_BLOB_BASE_URL` · `STEPD_BLOB_MAX_SIZE` ·
-`STEPD_BLOB_RESERVATION_TTL_HOURS`
+`STEPD_BLOB_RESERVATION_TTL_HOURS` · `STEPD_BLOB_S3_ENDPOINT` ·
+`STEPD_BLOB_S3_REGION` · `STEPD_BLOB_S3_BUCKET` · `STEPD_BLOB_S3_ACCESS_KEY` ·
+`STEPD_BLOB_S3_SECRET_KEY` · `STEPD_BLOB_S3_PATH_STYLE`
+
+`STEPD_LOG` and `STEPD_LOG_JSON` are not in that list because they are not
+`Config`'s: they back global `stepd-cli` flags (`main.rs`), so they apply to
+every subcommand rather than to the server.
 
 ### Driving a real workflow through it
 
