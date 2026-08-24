@@ -1,15 +1,16 @@
 //! The managed-blob transfer endpoints (protocol §8.3).
 //!
-//! Two routes, and the reason there are only two is the point of the design:
-//! **bytes never traverse the control plane on the way in**. The app reserves,
-//! uploads directly to wherever bytes live, and hands back a reference. §8.5
-//! forbids the server from interpreting payload content at all.
+//! Two routes at most, and the reason there are so few is the point of the
+//! design: **bulk data is not supposed to traverse the control plane**. The app
+//! reserves, uploads to wherever the bytes live, and hands back a reference.
+//! §8.5 forbids the server from interpreting payload content at all.
 //!
-//! The filesystem backend shipped here is the exception that proves it. It has
-//! no presigned-URL service of its own, so §8.3.2's compatibility fallback
-//! applies: the server relays the bytes. That is a fallback, it is warned about,
-//! and an S3-backed store implementing the same trait removes this route from
-//! the path entirely without anything above it changing.
+//! The filesystem backend is the exception that proves it. It has no
+//! presigned-URL service of its own, so §8.3.2's compatibility fallback
+//! applies: the server relays the bytes. That is a fallback and it is warned
+//! about. `stepd-blobs-s3` presigns, so [`router`] is called with `relay =
+//! false` for it and this module contributes only `:reserve` — the content
+//! route does not exist on that deployment at all.
 //!
 //! ## What authorises a transfer
 //!

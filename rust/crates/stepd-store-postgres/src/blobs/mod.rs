@@ -216,8 +216,11 @@ const DEFAULT_MAX_SIZE: i64 = 100 * 1024 * 1024;
 
 impl PostgresBlobStore {
     /// Build a store whose bytes live wherever `backend` puts them, with no
-    /// relay: the backend must presign, or the transfer endpoints will refuse
-    /// every request (Task 3 stops mounting them for a backend like this).
+    /// relay: the backend must presign, because [`PostgresBlobStore::put_bytes`]
+    /// and [`PostgresBlobStore::get_bytes`] refuse every call without one.
+    /// `Server::router` mounts the §8.3.2 relay route only where
+    /// `can_presign()` is false, so on the server that refusal is unreachable —
+    /// the route is not there. It still matters for any other caller.
     ///
     /// `caps` still verifies the capabilities on the server's transfer
     /// endpoints, independent of which backend is minting them.
