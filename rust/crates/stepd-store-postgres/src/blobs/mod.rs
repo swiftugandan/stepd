@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::path::PathBuf;
 use std::sync::Arc;
-use stepd_core::traits::{BlobBackend, BlobSpec, BlobStore, Reservation};
+use stepd_core::traits::{BlobBackend, BlobSpec, BlobStore, RelayBytes, Reservation};
 use stepd_core::{Error, Result};
 use stepd_proto::BlobRef;
 use uuid::Uuid;
@@ -53,12 +53,16 @@ pub struct PostgresBlobStore {
     pool: sqlx::PgPool,
     /// Where bytes live and who mints transfer URLs.
     backend: Arc<dyn BlobBackend>,
-    /// Set only when `backend` also relays bytes through this process — today,
-    /// always, since [`FilesystemBackend`] is the only backend and cannot
-    /// presign. The server's transfer endpoints and `commit_blob`'s
-    /// no-digest-from-metadata fallback use it; a presigning backend has no
-    /// equivalent, and Task 3 stops mounting those endpoints for one.
-    relay: Option<Arc<FilesystemBackend>>,
+    /// Set only when the backend can also relay bytes through this process —
+    /// today, always, since [`FilesystemBackend`] is the only backend and
+    /// cannot presign. The server's transfer endpoints and `commit_blob`'s
+    /// no-digest-from-metadata fallback use it; a presigning backend does not
+    /// implement [`RelayBytes`] at all, and Task 3 stops mounting those
+    /// endpoints for one. Named by capability rather than by concrete type —
+    /// naming `FilesystemBackend` here would rebuild the coupling this seam
+    /// exists to remove, and would stop any future relay-capable backend that
+    /// is not the filesystem from ever using it.
+    relay: Option<Arc<dyn RelayBytes>>,
     /// Mints and checks the transfer capabilities.
     caps: Capability,
     /// Ceiling on a single managed blob (protocol §8.2).
@@ -187,7 +191,7 @@ impl PostgresBlobStore {
         let caps = Capability::new(base_url, key);
         let fs = Arc::new(FilesystemBackend::new(root.into(), caps.clone()));
         let mut store = Self::with_backend(pool, fs.clone(), caps);
-        store.relay = Some(fs);
+        store.relay = Some(fs as Arc<dyn RelayBytes>);
         store
     }
 
@@ -227,7 +231,7 @@ impl PostgresBlobStore {
     /// `relay`.
     pub async fn put_bytes(&self, id: Uuid, bytes: &[u8]) -> Result<()> {
         match &self.relay {
-            Some(fs) => fs.put_bytes(id, bytes).await,
+            Some(relay) => relay.put_bytes(id, bytes).await,
             None => Err(Error::Store(
                 "this blob store's backend does not relay bytes through the server".into(),
             )),
@@ -240,7 +244,7 @@ impl PostgresBlobStore {
     /// `relay`.
     pub async fn get_bytes(&self, id: Uuid, range: Option<(u64, u64)>) -> Result<Vec<u8>> {
         match &self.relay {
-            Some(fs) => fs.get_bytes(id, range).await,
+            Some(relay) => relay.get_bytes(id, range).await,
             None => Err(Error::Store(
                 "this blob store's backend does not relay bytes through the server".into(),
             )),
@@ -431,10 +435,28 @@ impl BlobStore for PostgresBlobStore {
 
         let mut n = 0;
         for id in ids {
-            // Bytes first, then the row. The other order can leave an orphaned
-            // file with nothing left that knows its name; `stepd doctor` reports
-            // those, but not having them is better than reporting them.
-            self.backend.delete(id).await?;
+            // Bytes first, then the row: deleting the row first and the bytes
+            // second can leave an orphaned file with nothing left that knows
+            // its name. If the delete fails for a reason other than "already
+            // gone" (`BlobBackend::delete` already treats that as success),
+            // the row must survive it rather than be removed anyway — it is
+            // now the only remaining record that bytes still sit under `id`,
+            // and `stepd doctor` is what reports them. Removing the row here
+            // would create exactly the orphan the ordering exists to prevent,
+            // just one step later than doing it in the other order would.
+            //
+            // One bad object must not block the rest of the sweep either, so
+            // this logs and moves on rather than propagating: a store with
+            // one undeletable object would otherwise never collect anything
+            // again.
+            if let Err(e) = self.backend.delete(id).await {
+                tracing::warn!(
+                    blob = %id, error = %e,
+                    "failed to delete blob bytes during collection; leaving its row \
+                     so stepd doctor can still report it"
+                );
+                continue;
+            }
             sqlx::query("DELETE FROM blobs WHERE id=$1")
                 .bind(id)
                 .execute(&self.pool)
