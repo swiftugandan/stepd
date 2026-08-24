@@ -249,13 +249,22 @@ async fn write_content(
 /// - `Error::Config` is returned only for a real mismatch — the store
 ///   answered and the bytes it holds do not match what was declared — which
 ///   is what §8.3.2 reserves `blob_digest_mismatch` for.
-/// - `Error::Store` with the exact message `"no such blob {id}"` is returned
-///   only when the row is gone: collected after its 24h reservation window,
-///   or an id that was never reserved at all
-///   (`stepd-store-postgres/src/blobs/mod.rs`'s two `.ok_or_else` sites, both
-///   producing this identical string). Not a mismatch — nothing was compared
-///   — and not a backend failure either, since the store answered fine; there
-///   was simply no row. `404 no_such_blob` fits neither of the other codes.
+/// - `Error::NotFound` covers two different causes, not one —
+///   `stepd-store-postgres/src/blobs/mod.rs` has two call sites producing it,
+///   and this layer cannot tell which one fired. The first is the `blobs`
+///   row itself being gone: collected after its 24h reservation window, or an
+///   id that was never reserved at all. The second is the row still sitting
+///   there in `state='reserved'`, but the *object store* answering `Ok(None)`
+///   for it — in practice almost always an app that called `:reserve` and
+///   then never uploaded (or uploaded to a URL that failed or expired)
+///   before calling commit. Neither is a mismatch — nothing was compared —
+///   and neither is a backend failure either, since the store answered fine
+///   in both cases; there was simply nothing to find. `404 no_such_blob` fits
+///   neither of the other codes. Matched on the variant, not on message text:
+///   an earlier version matched `Error::Store(msg) if msg.starts_with("no
+///   such blob ")`, a contract between two crates carried in a string that
+///   nothing bound the producer to — rewording that log line would have
+///   turned a 404 into a 502 with no test going red.
 /// - Everything else. This is honestly two different things `commit_blob`'s
 ///   `Error` type cannot distinguish from each other: an object-store failure
 ///   (no checksum in the object's metadata, or a HEAD that never landed —
@@ -272,9 +281,7 @@ async fn write_content(
 fn commit_blob_problem(e: stepd_core::Error) -> Problem {
     match e {
         stepd_core::Error::Config(msg) => Problem::bad_request("blob_digest_mismatch", msg),
-        stepd_core::Error::Store(msg) if msg.starts_with("no such blob ") => {
-            Problem::not_found("no_such_blob", msg)
-        }
+        stepd_core::Error::NotFound(msg) => Problem::not_found("no_such_blob", msg),
         other => Problem::bad_gateway(
             "blob_backend_unavailable",
             format!("could not verify the upload: {other}"),
@@ -421,15 +428,43 @@ mod tests {
 
     #[test]
     fn a_missing_row_is_not_found_not_a_mismatch_or_a_gateway_failure() {
-        // `commit_blob` returns exactly this message, and only this message,
-        // when the row is gone: collected after its 24h window, or an id
-        // that was never reserved. Neither a mismatch (nothing was compared)
-        // nor a backend failure (the store answered fine; there was simply
-        // no row).
+        // Covers both `Error::NotFound` sources in `stepd-store-postgres`: the
+        // `blobs` row gone (collected, or an id never reserved) and the row
+        // present but the object store answering `Ok(None)` (usually a
+        // reservation that was never uploaded to). This layer cannot and need
+        // not tell them apart — see `commit_blob_problem`'s doc comment.
+        // Neither is a mismatch (nothing was compared) nor a backend failure
+        // (the store answered fine; there was simply nothing to find).
         let id = uuid::Uuid::nil();
-        let p = commit_blob_problem(stepd_core::Error::Store(format!("no such blob {id}")));
+        let p = commit_blob_problem(stepd_core::Error::NotFound(format!("no such blob {id}")));
         assert_eq!(p.status, StatusCode::NOT_FOUND);
         assert_eq!(p.code, "no_such_blob");
+    }
+
+    #[test]
+    fn a_not_found_error_is_matched_by_variant_not_by_message_text() {
+        // The bug this guards: an earlier version matched
+        // `Error::Store(msg) if msg.starts_with("no such blob ")`, a contract
+        // between two crates carried entirely in a message string. A message
+        // that happens to start the same way but is not actually the
+        // not-found case must not be swept into 404 by accident, and a
+        // `NotFound` with different wording must still land as 404 — proving
+        // the match is keyed off the variant, not the text.
+        let p = commit_blob_problem(stepd_core::Error::Store(
+            "no such blob table in this schema".into(),
+        ));
+        assert_ne!(
+            p.code, "no_such_blob",
+            "an Error::Store must never be read as not-found by its wording"
+        );
+
+        let p = commit_blob_problem(stepd_core::Error::NotFound(
+            "the reservation expired".into(),
+        ));
+        assert_eq!(
+            p.code, "no_such_blob",
+            "an Error::NotFound must be reported as not-found regardless of its wording"
+        );
     }
 
     #[test]

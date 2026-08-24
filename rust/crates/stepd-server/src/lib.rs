@@ -430,7 +430,13 @@ fn parse_bool_by_value(name: &str, v: Option<String>) -> Option<bool> {
 /// this directly against a closure over a fixed map; `Config::from_env` is the
 /// only real caller and supplies `std::env::var` at the edge.
 fn blob_backend_from(lookup: impl Fn(&str) -> Option<String>) -> BlobBackendConfig {
-    match lookup("STEPD_BLOB_BACKEND").as_deref() {
+    // Trimmed and lowercased before matching, the same as
+    // `parse_bool_by_value` four lines below handles `STEPD_BLOB_S3_PATH_STYLE`
+    // — without this, `STEPD_BLOB_BACKEND=S3` or `"s3 "` would warn as
+    // unrecognised and silently run on the filesystem, which is not "meeting
+    // it halfway" so much as refusing a spelling an operator plainly meant.
+    let backend = lookup("STEPD_BLOB_BACKEND").map(|v| v.trim().to_ascii_lowercase());
+    match backend.as_deref() {
         Some("s3") => BlobBackendConfig::S3(S3ConfigInput {
             endpoint: lookup("STEPD_BLOB_S3_ENDPOINT").and_then(|v| v.parse().ok()),
             // Most self-hosted S3-compatible servers ignore the region but
@@ -903,7 +909,7 @@ mod tests {
     // interfering through shared mutable state, and nothing in the build
     // catches the next one." Calling the pure function directly removes the
     // shared state rather than serialising around it.
-    fn lookup(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+    fn lookup<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |name| {
             pairs
                 .iter()
@@ -973,6 +979,33 @@ mod tests {
         // needs a tracing subscriber this test binary does not install.
         assert!(matches!(
             blob_backend_from(lookup(&[("STEPD_BLOB_BACKEND", "minio")])),
+            BlobBackendConfig::Filesystem { .. }
+        ));
+    }
+
+    #[test]
+    fn blob_backend_is_read_case_and_whitespace_insensitively() {
+        // `STEPD_BLOB_S3_PATH_STYLE` is normalised before matching
+        // (`parse_bool_by_value`); this must be too, or `STEPD_BLOB_BACKEND=S3`
+        // — plainly meaning S3 — falls through to the unrecognised-value
+        // branch and silently runs on the filesystem instead.
+        for value in ["s3", "S3", " s3 ", "S3 ", "\ts3\n"] {
+            assert!(
+                matches!(
+                    blob_backend_from(lookup(&[
+                        ("STEPD_BLOB_BACKEND", value),
+                        ("STEPD_BLOB_S3_ENDPOINT", "http://127.0.0.1:9000"),
+                        ("STEPD_BLOB_S3_BUCKET", "stepd"),
+                        ("STEPD_BLOB_S3_ACCESS_KEY", "probe"),
+                        ("STEPD_BLOB_S3_SECRET_KEY", "probeprobe"),
+                    ])),
+                    BlobBackendConfig::S3(_)
+                ),
+                "{value:?} must select the S3 backend"
+            );
+        }
+        assert!(matches!(
+            blob_backend_from(lookup(&[("STEPD_BLOB_BACKEND", "FS")])),
             BlobBackendConfig::Filesystem { .. }
         ));
     }
