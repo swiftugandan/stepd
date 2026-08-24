@@ -100,18 +100,19 @@ services:
       # STEPD_BLOB_BACKEND=s3; `serve` refuses to start on a half-configured
       # one rather than hand out upload URLs against a bucket that half exists.
       #
-      # YOUR APP MUST BE ON THIS COMPOSE NETWORK to use the S3 backend here.
-      # There is one endpoint, and it is both the address this server calls for
-      # HeadObject and the host of every presigned URL the app is handed —
-      # `S3Backend::read_url` signs against the bucket built from it. So
-      # `minio:9000` is reachable by the server and by a sibling service, and
-      # not by an app on the host. `localhost:9000` fails the other way —
-      # right for a host app, and resolving to this container for the
-      # server. Serving both would need a second, public endpoint to sign
-      # with, which is a code change rather than a compose one. The relay path
-      # has no such limit — that is what STEPD_BLOB_BASE_URL above is for.
+      # TWO endpoints, because one address cannot serve both sides.
+      # STEPD_BLOB_S3_ENDPOINT is what THIS SERVER calls for HeadObject and
+      # DeleteObject; STEPD_BLOB_S3_PUBLIC_ENDPOINT is the host baked into
+      # every presigned URL an app is handed, because SigV4 signs the host.
+      # On this network the server needs `minio:9000` and an app on the host
+      # needs `localhost:9000`, and before the second variable existed no
+      # single value served both — an app had to be on this compose network.
+      # Leave the public one out when both sides do share an address; it then
+      # signs against the endpoint. The relay path has no such limit — that is
+      # what STEPD_BLOB_BASE_URL above is for.
       # - STEPD_BLOB_BACKEND=${STEPD_BLOB_BACKEND:-}
       # - STEPD_BLOB_S3_ENDPOINT=http://minio:9000
+      # - STEPD_BLOB_S3_PUBLIC_ENDPOINT=http://localhost:9000
       # - STEPD_BLOB_S3_REGION=us-east-1
       # - STEPD_BLOB_S3_BUCKET=stepd
       # - STEPD_BLOB_S3_ACCESS_KEY=${STEPD_BLOB_S3_ACCESS_KEY:-}

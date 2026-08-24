@@ -53,6 +53,12 @@ fn config() -> Option<S3Config> {
     let var = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.into());
     Some(S3Config {
         endpoint: endpoint.parse().expect("STEPD_TEST_S3_ENDPOINT is a URL"),
+        // The live suite reaches the store as both server and client at one
+        // address, which is the shape this field exists to stop being the
+        // only one possible. Overridable so a future lane can split them.
+        public_endpoint: std::env::var("STEPD_TEST_S3_PUBLIC_ENDPOINT")
+            .ok()
+            .map(|v| v.parse().expect("STEPD_TEST_S3_PUBLIC_ENDPOINT is a URL")),
         region: var("STEPD_TEST_S3_REGION", "us-east-1"),
         bucket: var("STEPD_TEST_S3_BUCKET", "stepd"),
         access_key: var("STEPD_TEST_S3_ACCESS_KEY", "probe"),
