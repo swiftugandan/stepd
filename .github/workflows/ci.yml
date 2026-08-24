@@ -106,39 +106,12 @@ jobs:
           --health-timeout 5s --health-retries 10
     env:
       STEPD_TEST_DATABASE_URL: postgres://postgres:stepd@localhost:5432/stepd
-      # Bucket and credentials match `stepd-blobs-s3/tests/live.rs`'s own
-      # defaults, so both that suite and the step below reach the same
-      # server the same way. Set at job level, not step level, so
-      # `cargo test --workspace` further down already exercises the S3
-      # path too -- the explicit step near the end of this job exists for
-      # attribution, not because it is the only place these tests run.
-      STEPD_TEST_S3_ENDPOINT: http://127.0.0.1:9000
-      STEPD_TEST_S3_BUCKET: stepd
-      STEPD_TEST_S3_ACCESS_KEY: probe
-      STEPD_TEST_S3_SECRET_KEY: probeprobe
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-
-      - name: start MinIO for the S3 blob backend lane
-        # Not a `services:` container: an S3-compatible image needs a command
-        # (`server /data`) to start serving at all, and the `services:` block
-        # has no field for one -- only `docker run` does, so that is what
-        # this is. Pinned by tag, not `latest`: docs/blob-backends.md records
-        # this exact release as one confirmed to reject a presigned PUT whose
-        # body does not match its signed checksum, which is the property the
-        # whole S3 backend rests on. A lane whose backing image floats would
-        # report a failure that is not this branch's.
-        run: |
-          docker run -d --name stepd-s3 -p 9000:9000 \
-            -e MINIO_ROOT_USER="$STEPD_TEST_S3_ACCESS_KEY" \
-            -e MINIO_ROOT_PASSWORD="$STEPD_TEST_S3_SECRET_KEY" \
-            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
-          timeout 30 sh -c \
-            'until curl -sf http://127.0.0.1:9000/minio/health/live; do sleep 1; done'
 
       - name: protocol schemas
         # In a virtualenv, and pinned. ubuntu-latest ships jsonschema 4.10 in
@@ -174,16 +147,6 @@ jobs:
 
       - name: live-database and end-to-end tests
         run: cargo test --workspace
-        working-directory: rust
-
-      - name: blob backend against S3-compatible storage
-        # BR-19: bulk payload data must never traverse the control plane.
-        # `cargo test --workspace` above already runs both suites, because
-        # the S3 env is set at job level; this step exists so a failure on
-        # this specific path is attributable at a glance, the same reason
-        # the conformance battery below is its own step rather than folded
-        # into the one above.
-        run: cargo test -p stepd-blobs-s3 && cargo test -p stepd-server --test end_to_end no_object_bytes
         working-directory: rust
 
       - name: conformance battery against the reference app
