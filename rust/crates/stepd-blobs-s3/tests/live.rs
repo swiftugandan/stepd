@@ -63,6 +63,9 @@ fn config() -> Option<S3Config> {
         bucket: var("STEPD_TEST_S3_BUCKET", "stepd"),
         access_key: var("STEPD_TEST_S3_ACCESS_KEY", "probe"),
         secret_key: var("STEPD_TEST_S3_SECRET_KEY", "probeprobe"),
+        // MinIO's root credentials are a permanent pair; a live lane against a
+        // store issuing temporary ones would set this.
+        session_token: std::env::var("STEPD_TEST_S3_SESSION_TOKEN").ok(),
         path_style: true,
     })
 }

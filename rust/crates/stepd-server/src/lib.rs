@@ -194,6 +194,13 @@ pub struct S3ConfigInput {
     pub access_key: String,
     /// Secret access key.
     pub secret_key: String,
+    /// Session token for a temporary credential, if there is one.
+    ///
+    /// Optional in a way the other credential fields are not: a permanent key
+    /// pair is a complete configuration, so this joins no completeness check
+    /// in `resolve`. Deliberately absent from the `Debug` below — it is a
+    /// credential, and `finish_non_exhaustive` is what keeps it out of a log.
+    pub session_token: Option<String>,
     /// Address the bucket as a path segment rather than a hostname.
     pub path_style: bool,
 }
@@ -285,6 +292,7 @@ impl S3ConfigInput {
             bucket: self.bucket.clone(),
             access_key: self.access_key.clone(),
             secret_key: self.secret_key.clone(),
+            session_token: self.session_token.clone(),
             path_style: self.path_style,
         })
     }
@@ -549,6 +557,10 @@ fn blob_backend_from(lookup: impl Fn(&str) -> Option<String>) -> BlobBackendConf
             bucket: lookup("STEPD_BLOB_S3_BUCKET").unwrap_or_default(),
             access_key: lookup("STEPD_BLOB_S3_ACCESS_KEY").unwrap_or_default(),
             secret_key: lookup("STEPD_BLOB_S3_SECRET_KEY").unwrap_or_default(),
+            // Filtered, not passed through: `STEPD_BLOB_S3_SESSION_TOKEN=` in
+            // an .env file is a set variable holding an empty string, and
+            // `Some("")` would sign an empty token rather than none.
+            session_token: lookup("STEPD_BLOB_S3_SESSION_TOKEN").filter(|v| !v.trim().is_empty()),
             path_style: parse_bool_by_value(
                 "STEPD_BLOB_S3_PATH_STYLE",
                 lookup("STEPD_BLOB_S3_PATH_STYLE"),
@@ -942,6 +954,7 @@ mod tests {
             bucket: "stepd".into(),
             access_key: "probe".into(),
             secret_key: "probeprobe".into(),
+            session_token: None,
             path_style: true,
         }
     }
@@ -1063,6 +1076,58 @@ mod tests {
             .resolve()
             .expect("the probe config is complete");
         assert_eq!(c.public_endpoint, None);
+    }
+
+    #[test]
+    fn an_empty_session_token_is_no_token_rather_than_an_empty_one() {
+        // `NAME=` in a .env file is a set variable holding an empty value.
+        // Carrying that through as `Some("")` would sign an empty
+        // X-Amz-Security-Token, which the store rejects with a signature error
+        // that names neither the token nor the variable.
+        let cfg = blob_backend_from(lookup(&[
+            ("STEPD_BLOB_BACKEND", "s3"),
+            ("STEPD_BLOB_S3_ENDPOINT", "http://minio:9000"),
+            ("STEPD_BLOB_S3_BUCKET", "stepd"),
+            ("STEPD_BLOB_S3_ACCESS_KEY", "probe"),
+            ("STEPD_BLOB_S3_SECRET_KEY", "probeprobe"),
+            ("STEPD_BLOB_S3_SESSION_TOKEN", "   "),
+        ]));
+        match cfg {
+            BlobBackendConfig::S3(s) => assert_eq!(s.session_token, None),
+            other => panic!("expected the S3 backend, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_session_token_reaches_the_config_from_the_environment() {
+        let cfg = blob_backend_from(lookup(&[
+            ("STEPD_BLOB_BACKEND", "s3"),
+            ("STEPD_BLOB_S3_ENDPOINT", "http://minio:9000"),
+            ("STEPD_BLOB_S3_BUCKET", "stepd"),
+            ("STEPD_BLOB_S3_ACCESS_KEY", "probe"),
+            ("STEPD_BLOB_S3_SECRET_KEY", "probeprobe"),
+            ("STEPD_BLOB_S3_SESSION_TOKEN", "FQoGZXIvYXdzEExampleToken"),
+        ]));
+        match cfg {
+            BlobBackendConfig::S3(s) => assert_eq!(
+                s.session_token.as_deref(),
+                Some("FQoGZXIvYXdzEExampleToken")
+            ),
+            other => panic!("expected the S3 backend, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_session_token_does_not_reach_a_debug_line_from_the_input_side_either() {
+        // `S3ConfigInput` is what a `Config` actually holds, so it is the one
+        // that ends up in a start-up log line. Its hand-written Debug has to
+        // elide the token for the same reason `S3Config`'s does.
+        let c = S3ConfigInput {
+            session_token: Some("FQoGZXIvYXdzEExampleToken".into()),
+            ..probe_s3_config()
+        };
+        let printed = format!("{c:?}");
+        assert!(!printed.contains("ExampleToken"), "got {printed}");
     }
 
     #[test]
