@@ -137,8 +137,7 @@ async fn main() -> Result<()> {
         Command::Doctor => {
             let server = build(database_url, None).await?;
             println!("\nstepd doctor\n");
-            let findings =
-                doctor::run(server.state.store.pool(), &server.config.blob_backend).await;
+            let findings = doctor::run(server.state.store.pool(), &server.config).await;
             if doctor::report(&findings) {
                 // A non-zero exit so this is usable as a deployment gate rather
                 // than something a human has to read and interpret.

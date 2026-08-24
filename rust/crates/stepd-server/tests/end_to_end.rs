@@ -1604,7 +1604,7 @@ async fn fixture_with_s3(label: &str) -> Option<S3Fixture> {
     config.database_url = database_url;
     config.blob_key = SIGNING_KEY.to_vec();
     config.blob_backend = BlobBackendConfig::S3(stepd_server::S3ConfigInput {
-        endpoint: Some(s3.endpoint.clone()),
+        endpoint: stepd_server::EndpointInput::Url(s3.endpoint.clone()),
         region: s3.region.clone(),
         bucket: s3.bucket.clone(),
         access_key: s3.access_key.clone(),

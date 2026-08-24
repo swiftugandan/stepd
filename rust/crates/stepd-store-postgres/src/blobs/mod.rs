@@ -9,8 +9,8 @@
 //! Where the bytes live and who mints the transfer URLs is a
 //! [`stepd_core::traits::BlobBackend`]; this module owns only the index —
 //! the row, the per-namespace dedupe, the references recorded by trigger — so
-//! a second backend (S3, say) is a new implementation of that trait, not a
-//! second implementation of this one.
+//! a second backend is a new implementation of that trait, not a second
+//! implementation of this one. `stepd-blobs-s3` is the second one.
 //!
 //! ## Why the URLs are signed rather than session-authenticated
 //!
@@ -53,25 +53,29 @@ pub use stepd_core::blob_ids;
 
 /// Blob index in Postgres; bytes and transfer URLs come from a [`BlobBackend`].
 ///
-/// The server builds a [`FilesystemBackend`] and passes it to
-/// [`PostgresBlobStore::with_backend_and_relay`], which is what makes `stepd
-/// dev` work with no cloud account and what CI uses. Nothing in this struct's
-/// `BlobStore` methods knows that, though — they only ever call through the
-/// trait, which is what makes another backend a drop-in swap.
+/// The server picks one backend from `STEPD_BLOB_BACKEND` and passes it to
+/// [`PostgresBlobStore::with_backend_and_relay`]: a [`FilesystemBackend`] by
+/// default, which is what makes `stepd dev` work with no cloud account and
+/// what CI uses, or `stepd_blobs_s3::S3Backend`. Nothing in this struct's
+/// `BlobStore` methods knows which — they only ever call through the trait,
+/// which is what makes another backend a drop-in swap.
 #[derive(Clone)]
 pub struct PostgresBlobStore {
     pool: sqlx::PgPool,
     /// Where bytes live and who mints transfer URLs.
     backend: Arc<dyn BlobBackend>,
-    /// Set only when the backend can also relay bytes through this process —
-    /// today, always, since [`FilesystemBackend`] is the only backend and
-    /// cannot presign. The server's transfer endpoints and `commit_blob`'s
-    /// no-digest-from-metadata fallback use it; a presigning backend does not
-    /// implement [`RelayBytes`] at all, and Task 3 stops mounting those
-    /// endpoints for one. Named by capability rather than by concrete type —
-    /// naming `FilesystemBackend` here would rebuild the coupling this seam
-    /// exists to remove, and would stop any future relay-capable backend that
-    /// is not the filesystem from ever using it.
+    /// Set only when the backend can also relay bytes through this process.
+    /// [`FilesystemBackend`] can and does; `stepd_blobs_s3::S3Backend`
+    /// presigns and so does not implement [`RelayBytes`] at all, which is
+    /// what makes this `None` on that deployment and what leaves the server's
+    /// §8.3.2 transfer endpoints unmounted for it (`Server::router` passes
+    /// `relay = !can_presign()`). The server's transfer endpoints and
+    /// `commit_blob`'s no-digest-from-metadata fallback are the two users.
+    ///
+    /// Named by capability rather than by concrete type — naming
+    /// `FilesystemBackend` here would rebuild the coupling this seam exists to
+    /// remove, and would stop any future relay-capable backend that is not the
+    /// filesystem from ever using it.
     relay: Option<Arc<dyn RelayBytes>>,
     /// Mints and checks the transfer capabilities.
     caps: Capability,

@@ -74,18 +74,27 @@ impl Finding {
 
 /// Run every check.
 ///
-/// `blob_backend` is the server's configured backend, not read from the
-/// database. It drives one check, beside `orphaned_blobs`, and only for one
-/// class of S3 misconfiguration: `Server::build` — which `doctor` goes
-/// through too, via the same `build()` in `main.rs` — already refuses to
-/// start at all when a required `STEPD_BLOB_S3_*` variable is *absent*, so
-/// `doctor` never gets this far in that case either; nothing here is reached.
-/// What survives to be checked here is a config that is *present but wrong*:
-/// a bucket, endpoint and both keys that are all set, but a key that is
-/// rejected or an endpoint nothing answers on. That is exactly the case
-/// `serve` cannot catch at startup and an operator otherwise learns about
-/// from a failed upload, so it is worth `doctor` diagnosing on its own.
-pub async fn run(pool: &PgPool, blob_backend: &stepd_server::BlobBackendConfig) -> Vec<Finding> {
+/// `config` is the server's own configuration, not read from the database. It
+/// drives one check beside `orphaned_blobs`, and both halves of what selects
+/// that check matter.
+///
+/// `Config::blobs_enabled()` first: without a `STEPD_BLOB_SIGNING_KEY` the
+/// managed-blob subsystem is off, `POST /v1/blobs:reserve` answers 501, and no
+/// byte will ever reach the configured bucket. Reporting "the endpoint is
+/// reachable and these credentials can read from it" for that deployment is a
+/// green light on a subsystem that is switched off, which is worse than
+/// silence: the operator concludes blobs work. `blob_configured_but_disabled`
+/// says the actual state instead.
+///
+/// Then the backend variant. `Server::build` — which `doctor` goes through
+/// too, via the same `build()` in `main.rs` — refuses to start when managed
+/// blobs are enabled and a required `STEPD_BLOB_S3_*` variable is *absent*, so
+/// `doctor` never gets this far in that case. What survives to be checked here
+/// is a config that is *present but wrong*: a bucket, endpoint and both keys
+/// all set, but a key that is rejected or an endpoint nothing answers on. That
+/// is exactly the case `serve` cannot catch at startup and an operator
+/// otherwise learns about from a failed upload.
+pub async fn run(pool: &PgPool, config: &stepd_server::Config) -> Vec<Finding> {
     let mut out = Vec::new();
     out.push(schema_version(pool).await);
     out.push(structural_invariants(pool).await);
@@ -94,8 +103,12 @@ pub async fn run(pool: &PgPool, blob_backend: &stepd_server::BlobBackendConfig) 
     out.push(partition_lag(pool).await);
     out.push(stuck_leases(pool).await);
     out.push(orphaned_blobs(pool).await);
-    if let stepd_server::BlobBackendConfig::S3(s3) = blob_backend {
-        out.push(s3_bucket_reachable(s3).await);
+    if let stepd_server::BlobBackendConfig::S3(s3) = &config.blob_backend {
+        if config.blobs_enabled() {
+            out.push(s3_bucket_reachable(s3).await);
+        } else {
+            out.push(blob_configured_but_disabled());
+        }
     }
     out.push(unreachable_apps(pool).await);
     out.push(inbox_overflow(pool).await);
@@ -345,6 +358,36 @@ async fn orphaned_blobs(pool: &PgPool) -> Finding {
     }
 }
 
+/// An S3 backend configured on a server where managed blobs are switched off.
+///
+/// `STEPD_BLOB_BACKEND=s3` with all four `STEPD_BLOB_S3_*` variables set and
+/// no `STEPD_BLOB_SIGNING_KEY` builds no blob store at all: `Server::build`
+/// takes the `else` branch of `if config.blobs_enabled()`, `:reserve` answers
+/// 501, and the bucket is never touched. Probing it and reporting it reachable
+/// would tell an operator the opposite of what is true, so this reports the
+/// state instead of the endpoint.
+///
+/// A warning rather than `critical`: the server runs, and every path other
+/// than managed blobs works. It is not `ok` either, because the combination is
+/// almost always half a configuration rather than a decision — nobody sets
+/// four S3 variables for a subsystem they mean to leave off.
+///
+/// Takes no arguments and touches nothing: the whole finding is that a
+/// deliberate probe would be meaningless here.
+fn blob_configured_but_disabled() -> Finding {
+    Finding::warn(
+        "blob-store",
+        "STEPD_BLOB_BACKEND=s3 is configured, but managed blobs are disabled because no \
+         STEPD_BLOB_SIGNING_KEY is set: POST /v1/blobs:reserve answers 501 and nothing will \
+         ever be written to the bucket. The endpoint was not probed, because reaching it \
+         would prove nothing about a subsystem that is switched off",
+        "set STEPD_BLOB_SIGNING_KEY (`openssl rand -hex 32`) to enable managed blobs, or \
+         unset STEPD_BLOB_BACKEND and the STEPD_BLOB_S3_* variables if leaving them off \
+         was deliberate. The signing key gates the whole subsystem, including the S3 \
+         backend, which has no other use for it",
+    )
+}
+
 /// Whether this backend's credentials can reach and use the configured
 /// endpoint and bucket.
 ///
@@ -352,11 +395,21 @@ async fn orphaned_blobs(pool: &PgPool) -> Finding {
 /// app's first upload fails — a `blob_backend_unavailable` three systems away
 /// from whoever configured them. `S3Backend::check_bucket` probes with a
 /// `HeadObject`, not a write and not a `HeadBucket`: see its doc comment for
-/// why `HeadBucket` would fail a correctly least-privileged deployment. `s3`
-/// arriving here is always a resolved, complete config in practice — `serve`
-/// and `doctor` both go through `Server::build`, which refuses to start
-/// before either gets this far — but `resolve()` is called again rather than
-/// trusted, on the same reasoning as its own doc comment.
+/// why `HeadBucket` would fail a correctly least-privileged deployment.
+///
+/// Because the probe is a read, it cannot see the misconfiguration this check
+/// most exists to catch: credentials granting `GetObject`, `HeadObject` and
+/// `DeleteObject` but not `PutObject` pass as reachable and then fail every
+/// upload with the object store's own 403 — a system away from whoever
+/// configured it, which is the failure shape named above. The probe stays
+/// read-only regardless, because a write probe has to leave an object in the
+/// bucket or delete one to clean up after itself, and the `Reachable` text
+/// says what it did not test rather than implying a pass it did not earn.
+///
+/// `s3` arriving here is always a resolved, complete config in practice —
+/// `serve` and `doctor` both go through `Server::build`, which refuses to
+/// start before either gets this far — but `resolve()` is called again rather
+/// than trusted, on the same reasoning as its own doc comment.
 async fn s3_bucket_reachable(s3: &stepd_server::S3ConfigInput) -> Finding {
     let cfg = match s3.resolve() {
         Ok(c) => c,
@@ -385,7 +438,9 @@ async fn s3_bucket_reachable(s3: &stepd_server::S3ConfigInput) -> Finding {
             "blob-store",
             "S3 endpoint reachable and these credentials can read from it (a HeadObject \
              probe on a key that cannot exist, so this cannot by itself tell an absent \
-             bucket apart from a present one that simply has nothing at that key)",
+             bucket apart from a present one that simply has nothing at that key, and it \
+             is a read: it does not test PutObject, so credentials that can read but not \
+             write reach this same line and then fail every upload)",
         ),
         // A warning, not `critical`: on real AWS S3, `HeadObject` on a
         // non-existent key answers 403 rather than 404 unless the caller
@@ -398,14 +453,25 @@ async fn s3_bucket_reachable(s3: &stepd_server::S3ConfigInput) -> Finding {
         // through the outcome instead of the permission. This 403 cannot be
         // told apart from a real credentials problem, so it is reported as
         // inconclusive rather than as a confirmed one.
+        //
+        // The clock is named as a third cause because nothing else here can
+        // find it: SigV4 refuses a request whose `X-Amz-Date` is more than
+        // about fifteen minutes from the object store's clock, with the same
+        // 403, and the `clock` check above compares this host against
+        // Postgres — the object store is a third clock nothing in `doctor`
+        // reads.
         stepd_blobs_s3::BucketCheck::Forbidden => Finding::warn(
             "blob-store",
-            "S3 endpoint reachable, but this probe got 403 — inconclusive: either the \
-             configured credentials are wrong, or they are correct and simply lack \
-             bucket-level s3:ListBucket, which real AWS S3 also answers with 403 for a \
-             HeadObject on a key that does not exist",
+            "S3 endpoint reachable, but this probe got 403 — inconclusive, and at least \
+             three things produce it: the configured credentials are wrong; or they are \
+             correct and simply lack bucket-level s3:ListBucket, which real AWS S3 also \
+             answers with 403 for a HeadObject on a key that does not exist; or this \
+             host's clock is more than about 15 minutes from the object store's, which \
+             SigV4 refuses the same way",
             "if uploads are actually failing, check STEPD_BLOB_S3_ACCESS_KEY and \
-             STEPD_BLOB_S3_SECRET_KEY; if they are working, this 403 is expected for a \
+             STEPD_BLOB_S3_SECRET_KEY, then compare this host's clock against the object \
+             store's (the `clock` check above compares it against Postgres, not against \
+             the store); if uploads are working, this 403 is expected for a \
              least-privileged policy and can be ignored — see docs/blob-backends.md",
         ),
         stepd_blobs_s3::BucketCheck::Unreachable(detail) => Finding::critical(
@@ -544,6 +610,27 @@ mod tests {
     #[test]
     fn a_clean_report_does_not_fail() {
         assert!(!report(&[Finding::ok("a", "fine")]));
+    }
+
+    #[test]
+    fn an_s3_backend_with_managed_blobs_off_is_reported_rather_than_probed() {
+        // `doctor` used to key this check off `BlobBackendConfig` alone, so
+        // `STEPD_BLOB_BACKEND=s3` with all four S3 variables and no signing
+        // key printed "S3 endpoint reachable and these credentials can read
+        // from it" and exited 0 — while `:reserve` answered 501. Green-
+        // lighting a subsystem that is switched off is worse than saying
+        // nothing, because the operator concludes blobs work.
+        let f = blob_configured_but_disabled();
+        assert_eq!(f.severity, Severity::Warn, "the server still runs");
+        assert!(
+            f.detail.contains("STEPD_BLOB_SIGNING_KEY"),
+            "the finding must name the variable that is actually missing: {}",
+            f.detail
+        );
+        assert!(
+            !f.remedy.is_empty(),
+            "a warning an operator cannot act on teaches them to skip the report"
+        );
     }
 
     #[test]

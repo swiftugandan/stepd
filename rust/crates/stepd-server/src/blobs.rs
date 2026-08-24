@@ -266,6 +266,18 @@ async fn write_content(
 ///   such blob ")`, a contract between two crates carried in a string that
 ///   nothing bound the producer to — rewording that log line would have
 ///   turned a 404 into a 502 with no test going red.
+/// - `Error::Unsupported` is the backend answering that it cannot do what the
+///   engine needs of it — today, an object store that does not report the
+///   checksum `stepd-blobs-s3` verifies digests from. Its own code, because
+///   the remedy is an operator's and is not this upload's: `502
+///   blob_backend_incompatible` rather than the general
+///   `blob_backend_unavailable`, which invites a retry that will fail
+///   identically. It is not reachable through *this* route today —
+///   `router(relay)` only mounts the content endpoints when the backend
+///   cannot presign, and `FilesystemBackend`, the one backend that qualifies,
+///   never returns this variant — but the mapping is here rather than folded
+///   into the fallback so that a future relay-capable backend that can does
+///   not get "unavailable" by default.
 /// - Everything else. This is honestly two different things `commit_blob`'s
 ///   `Error` type cannot distinguish from each other: an object-store failure
 ///   (no checksum in the object's metadata, or a HEAD that never landed —
@@ -283,6 +295,9 @@ fn commit_blob_problem(e: stepd_core::Error) -> Problem {
     match e {
         stepd_core::Error::Config(msg) => Problem::bad_request("blob_digest_mismatch", msg),
         stepd_core::Error::NotFound(msg) => Problem::not_found("no_such_blob", msg),
+        stepd_core::Error::Unsupported(msg) => {
+            Problem::bad_gateway("blob_backend_incompatible", msg)
+        }
         other => Problem::bad_gateway(
             "blob_backend_unavailable",
             format!("could not verify the upload: {other}"),

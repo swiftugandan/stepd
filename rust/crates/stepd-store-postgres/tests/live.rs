@@ -984,3 +984,165 @@ async fn committing_an_already_committed_blob_does_not_look_at_the_object_again(
         .expect("read the state back");
     assert_eq!(state, "committed");
 }
+
+/// Connect and migrate with a read-URL backend attached, or `None` to skip.
+///
+/// Separate from `store()` rather than a flag on it: `with_blob_backend`
+/// consumes the store, and the two tests below are the only ones that need a
+/// backend at all. Every other test in this file must keep running with
+/// `blob_backend: None`, which is what the walk being a no-op there proves.
+async fn store_with_read_urls() -> Option<Arc<PostgresStore>> {
+    let url = std::env::var("STEPD_TEST_DATABASE_URL").ok()?;
+    let s = PostgresStore::connect(&url, 8).await.expect("connect");
+    s.migrate().await.expect("migrate");
+    Some(Arc::new(s.with_blob_backend(Arc::new(ReadUrlBackend))))
+}
+
+/// A `BlobBackend` that mints an unmistakable read URL and nothing else.
+///
+/// Read-only on purpose: the tests below exercise the journal walk that runs on
+/// the way *out* to an app, and a backend that could also store or delete would
+/// let a failure in either be mistaken for one in the walk.
+struct ReadUrlBackend;
+
+#[async_trait::async_trait]
+impl BlobBackend for ReadUrlBackend {
+    async fn upload_target(
+        &self,
+        _id: Uuid,
+        _spec: &BlobSpec,
+        _ttl: Duration,
+    ) -> stepd_core::Result<UploadTarget> {
+        unimplemented!("the read path mints no upload targets")
+    }
+
+    fn read_url(&self, id: Uuid, size: i64, _ttl: Duration) -> stepd_core::Result<String> {
+        Ok(format!("stub://{id}/{size}"))
+    }
+
+    async fn stored(&self, _id: Uuid) -> stepd_core::Result<Option<StoredObject>> {
+        unimplemented!("the read path reads no objects")
+    }
+
+    async fn delete(&self, _id: Uuid) -> stepd_core::Result<()> {
+        unimplemented!("the read path deletes nothing")
+    }
+
+    fn can_presign(&self) -> bool {
+        true
+    }
+
+    fn name(&self) -> &'static str {
+        "read-url-stub"
+    }
+}
+
+/// A run input carrying a `$blob` must reach the app with a URL on it.
+///
+/// The engine already treats these references as first class on every other
+/// axis: `op_blob_ids` walks `Op::Invoke`'s and `Op::ContinueAsNew`'s `input`,
+/// so `Dispatcher::verify_blobs` commits them, and `runs_record_blob_refs` in
+/// `0011_blob_refs.sql` records an `:input` reference so the collector spares
+/// the bytes. Shipping the same reference to the child with no `url` left the
+/// app holding something `Blobs::fetch` reports as `NoReadUrl` — with a message
+/// telling it the reference "must come from a step result of the current
+/// attempt", about one the engine itself put in the input.
+#[tokio::test]
+async fn a_blob_in_a_run_input_reaches_the_child_with_a_read_url() {
+    let Some(s) = store_with_read_urls().await else {
+        eprintln!("SKIPPED: set STEPD_TEST_DATABASE_URL to run the live-database tests");
+        return;
+    };
+    let ns = namespace(&s, "blobinput").await;
+    let blob = Uuid::now_v7();
+
+    let parent = s
+        .create_run(NewRun::root(&ns, "parent"))
+        .await
+        .unwrap()
+        .unwrap();
+    let lease = lease_for(&s, &ns, parent).await;
+    s.commit(
+        parent,
+        lease.fence,
+        OpCommit {
+            ops: vec![Op::Invoke {
+                id: "render".into(),
+                hash: "inpblob000000001".into(),
+                function: "renderer".into(),
+                input: Some(serde_json::json!({
+                    "doc": { "$blob": { "id": blob, "size": 11, "sha256": "ab" } }
+                })),
+                detach: false,
+            }],
+            emit: vec![],
+        },
+    )
+    .await
+    .unwrap();
+
+    let child_lease = s
+        .claim(&ns, "w", 10, Duration::seconds(60))
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("the child is dispatchable");
+    let attempt = s.load_attempt(&child_lease).await.unwrap();
+    let input = attempt.run.input.expect("the child gets its input");
+    assert_eq!(
+        input["doc"]["$blob"]["url"],
+        serde_json::json!(format!("stub://{blob}/11")),
+        "a $blob the engine verified and reference-counted must be readable too"
+    );
+}
+
+/// The paged journal (§8.6) mints read URLs like the inline one does.
+///
+/// `load_attempt` ships at most `attempt_state_limit` steps and sets
+/// `state_truncated`; the SDK then fetches the rest through `steps_page`. If
+/// only the inline path minted URLs, whether a reference was usable would
+/// depend on how many steps the run happened to have recorded by then — a
+/// failure that appears in production, on long runs, and never in a test with
+/// three steps.
+#[tokio::test]
+async fn a_blob_in_a_paged_step_result_also_carries_a_read_url() {
+    let Some(s) = store_with_read_urls().await else {
+        eprintln!("SKIPPED: set STEPD_TEST_DATABASE_URL to run the live-database tests");
+        return;
+    };
+    let ns = namespace(&s, "blobpage").await;
+    let blob = Uuid::now_v7();
+
+    let run = s
+        .create_run(NewRun::root(&ns, "pager"))
+        .await
+        .unwrap()
+        .unwrap();
+    let lease = lease_for(&s, &ns, run).await;
+    s.commit(
+        run,
+        lease.fence,
+        OpCommit {
+            ops: vec![Op::Step {
+                id: "receipt".into(),
+                hash: "pageblob00000001".into(),
+                data: Some(serde_json::json!({
+                    "file": { "$blob": { "id": blob, "size": 7, "sha256": "cd" } }
+                })),
+                meta: None,
+                error: None,
+            }],
+            emit: vec![],
+        },
+    )
+    .await
+    .unwrap();
+
+    let page = s.steps_page(run, None, 100).await.unwrap();
+    assert_eq!(
+        page.steps["pageblob00000001"].data.as_ref().unwrap()["file"]["$blob"]["url"],
+        serde_json::json!(format!("stub://{blob}/7")),
+        "a reference must not stop being dereferenceable once the journal pages"
+    );
+}

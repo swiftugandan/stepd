@@ -232,8 +232,14 @@ services:
   # Read docs/blob-backends.md first — not every S3-compatible server
   # actually enforces the checksum this backend's presigned uploads rely on.
   #
+  # Pinned to the release docs/blob-backends.md actually tested, like every
+  # other image in this file. `:latest` on an object store is the tag most
+  # worth not floating: the property this backend depends on — the server
+  # rejecting a PUT whose body does not match the signed
+  # x-amz-checksum-sha256 — is one a release could change, and the table in
+  # that note would then be recording a server nobody is running.
   # minio:
-  #   image: quay.io/minio/minio:latest
+  #   image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
   #   restart: unless-stopped
   #   command: ["server", "/data"]
   #   environment:
@@ -249,10 +255,18 @@ services:
   #     start_period: 10s
   #
   # This backend never creates the bucket itself (`stepd-blobs-s3`'s module
-  # docs), so something has to before `serve` will accept an upload:
-  #   docker compose --profile ops run --rm --entrypoint sh minio -c \
-  #     "mc alias set local http://minio:9000 \$MINIO_ROOT_USER \$MINIO_ROOT_PASSWORD && \
-  #      mc mb -p local/stepd"
+  # docs), so something has to before `serve` will accept an upload. Run this
+  # once the minio service is up:
+  #   docker compose exec minio sh -c \
+  #     'mc alias set local http://127.0.0.1:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" && \
+  #      mc mb -p local/stepd'
+  #
+  # `exec`, not `run --profile ops`: this service declares no profiles, so
+  # naming one selects nothing. Both `curl` and `mc` are in the image above —
+  # checked, not assumed — and the `local` alias it ships points at
+  # localhost:9000 with no credentials, which is why `mc alias set` re-points
+  # it at the container's own port with the root user rather than at the
+  # service name over the compose network.
 
 volumes:
   pgdata:

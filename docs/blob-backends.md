@@ -1,7 +1,7 @@
 # Object store compatibility: presigned PUT with a signed checksum header
 
 The S3 blob backend design (see the [S3 blob backend
-plan](.superpowers/sdd/2026-08-24-s3-blob-backend/)) presigns a `PutObject`
+plan](superpowers/plans/2026-08-24-s3-blob-backend.md)) presigns a `PutObject`
 whose signature covers `x-amz-checksum-sha256`, and relies on the object
 store rejecting a PUT whose body does not match that header. That property is
 a [known sharp edge even on real

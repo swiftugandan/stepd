@@ -438,10 +438,27 @@ where
             // re-executions of a side effect the engine knows nothing about, to
             // rescue a claim the app was better placed to check than we are. A
             // conforming SDK already errors on a failed PUT rather than
-            // returning the reference (`stepd-sdk/src/blobs.rs`), so a reference
-            // to an object that is not there means a client that did not, and
-            // twenty more attempts will not make it one. It keeps its own code
-            // so an operator can tell it from a digest mismatch.
+            // returning the reference (`stepd-sdk/src/blobs.rs`), so most
+            // references to an object that is not there mean a client that did
+            // not, and twenty more attempts will not make it one. It keeps its
+            // own code so an operator can tell it from a digest mismatch.
+            //
+            // Not the only cause, though, and the second one is a conforming
+            // client losing a race. `PostgresBlobStore::reserve` dedupes on
+            // `state='committed'` with no age or reference condition, and
+            // `collect` deletes committed rows that no `blob_refs` row points
+            // at once `committed_at` is past the window. An upload made outside
+            // a step — which the SDK documents as supported, and which leaves
+            // no journal reference to keep the bytes alive — can therefore be
+            // deduplicated against a row the collector is about to take:
+            // `reserve` answers `Deduplicated`, the app skips the upload
+            // exactly as §8.3.2 requires it to, the collector removes the row
+            // and the object, and this `commit_blob` finds nothing. A retry
+            // would in fact rescue that one, because the row is gone and
+            // `reserve` no longer dedupes. It is still on the non-retryable
+            // side on balance: the cost of being wrong the other way is paid by
+            // every app, on the far commoner cause, in side effects nobody
+            // asked to repeat.
             if e.is_retryable() {
                 return BlobCheck::Unavailable(ErrorBody::coded(
                     "blob_backend_unavailable",
@@ -451,6 +468,12 @@ where
             let (code, message) = match &e {
                 Error::Config(msg) => ("blob_digest_mismatch", msg.clone()),
                 Error::NotFound(msg) => ("no_such_blob", msg.clone()),
+                // The backend answered and cannot do what the engine needs of
+                // it — an object store that does not report the checksum an
+                // S3 backend verifies from, say. Its own code because the
+                // remedy is an operator's and has nothing to do with this run:
+                // change the store, or relay bytes through the server instead.
+                Error::Unsupported(msg) => ("blob_backend_incompatible", msg.clone()),
                 other => ("blob_not_verified", other.to_string()),
             };
             return BlobCheck::Refused(ErrorBody::coded(code, message));
