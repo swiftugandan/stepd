@@ -40,7 +40,7 @@
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use rusty_s3::actions::{DeleteObject, GetObject, HeadBucket, HeadObject, PutObject};
+use rusty_s3::actions::{DeleteObject, GetObject, HeadObject, PutObject};
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use stepd_core::traits::{BlobBackend, BlobSpec, StoredObject, UploadTarget};
 use stepd_core::{Error, Result};
@@ -345,7 +345,7 @@ impl BlobBackend for S3Backend {
     }
 }
 
-/// What asking the object store about its bucket found.
+/// What probing the object store with this backend's credentials found.
 ///
 /// Three states, not a bare `Result`: "reachable but these credentials are
 /// refused" and "never got an answer at all" call for different remedies —
@@ -354,33 +354,71 @@ impl BlobBackend for S3Backend {
 /// operator try the wrong fix first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BucketCheck {
-    /// `HeadBucket` returned success: the bucket exists and these credentials
-    /// can see it.
+    /// The probe `HeadObject` came back 2xx or 404: the endpoint answered and
+    /// these credentials may read there. A 404 is included deliberately — the
+    /// probed key is chosen to never exist, so 404 is the expected success
+    /// case, not a failure. See [`S3Backend::check_bucket`] for what this
+    /// cannot tell you.
     Reachable,
-    /// `HeadBucket` returned 403: the endpoint answered, but not for these
+    /// The probe returned 403: the endpoint answered, but not for these
     /// credentials.
     Forbidden,
     /// No usable answer — wrong endpoint, network failure, or a status other
-    /// than success or 403.
+    /// than success, 404 or 403.
     Unreachable(String),
 }
 
+/// Id the doctor probe reads, chosen to be one this backend can never have
+/// stored: [`S3Backend::upload_target`] is only ever handed a
+/// [`uuid::Uuid::now_v7`] id, which is time-ordered and never all-zero.
+const DOCTOR_PROBE_ID: Uuid = Uuid::nil();
+
 impl S3Backend {
-    /// Ask the object store whether the configured bucket is there and usable,
-    /// with a `HeadBucket` rather than a write.
+    /// Ask the object store whether this backend's credentials can reach and
+    /// read from the configured endpoint and bucket, with a `HeadObject` on
+    /// an id that can never exist rather than a `HeadBucket`.
+    ///
+    /// Deliberately not `HeadBucket`: that action needs bucket-level
+    /// `s3:ListBucket`, a permission this backend does not otherwise use —
+    /// every real operation here is `PutObject`/`GetObject`/`HeadObject`/
+    /// `DeleteObject` scoped to `bucket/*`. A policy scoped to exactly what
+    /// this backend needs would then make `HeadBucket` answer 403 while every
+    /// real transfer succeeds: a correctly least-privileged deployment
+    /// failing its own health check. `HeadObject` on a key nothing will ever
+    /// occupy needs no permission this backend does not already require.
+    ///
+    /// The cost of that swap: this cannot tell an absent bucket apart from a
+    /// bucket that exists but holds nothing at the probed key. Both answer
+    /// identically — 404 — to a `HeadObject` for a key that was never there.
+    /// It answers "can these credentials read from where the config says the
+    /// bucket is", not "does the bucket exist"; callers should say so rather
+    /// than imply the stronger claim.
     ///
     /// For `stepd doctor`: wrong credentials or an unreachable endpoint today
     /// surface only when an app's first upload fails, a system away from
     /// whoever configured them. This lets an operator learn it at the same
-    /// moment they learn everything else `doctor` checks — including when the
-    /// main server will not start at all.
+    /// moment they learn everything else `doctor` checks.
     pub async fn check_bucket(&self) -> BucketCheck {
-        let action = HeadBucket::new(&self.bucket, Some(&self.credentials));
+        let key = Self::key(DOCTOR_PROBE_ID);
+        let mut action = HeadObject::new(&self.bucket, Some(&self.credentials), &key);
+        action
+            .headers_mut()
+            .insert("x-amz-checksum-mode", "ENABLED");
         let url = action.sign(INTERNAL_TTL);
-        match self.http.head(url).send().await {
-            Ok(res) if res.status().is_success() => BucketCheck::Reachable,
+        match self
+            .http
+            .head(url)
+            .header("x-amz-checksum-mode", "ENABLED")
+            .send()
+            .await
+        {
+            Ok(res)
+                if res.status().is_success() || res.status() == reqwest::StatusCode::NOT_FOUND =>
+            {
+                BucketCheck::Reachable
+            }
             Ok(res) if res.status() == reqwest::StatusCode::FORBIDDEN => BucketCheck::Forbidden,
-            Ok(res) => BucketCheck::Unreachable(format!("HeadBucket returned {}", res.status())),
+            Ok(res) => BucketCheck::Unreachable(format!("HeadObject returned {}", res.status())),
             Err(e) => BucketCheck::Unreachable(e.to_string()),
         }
     }

@@ -178,10 +178,13 @@ services:
   # --------------------------------------------------------------- diagnostics
   #   docker compose --profile ops run --rm doctor
   # Structural, connectivity and blob-store checks against the live database;
-  # non-zero exit on anything critical. Runnable when the server will not
-  # start, which is when it matters — so it needs the same STEPD_BLOB_S3_*
-  # variables as the `stepd` service above if you have uncommented those there,
-  # or the bucket-reachability check has nothing to check.
+  # non-zero exit on anything critical. Runnable against a database whose
+  # `serve` will not start — but that only covers S3 credentials or an
+  # endpoint that are set and wrong; an S3 backend with a variable missing
+  # fails this the same way it fails `serve`, before any of these checks run.
+  # Needs the same STEPD_BLOB_S3_* variables as the `stepd` service above if
+  # you have uncommented those there, or the bucket-reachability check has
+  # nothing to check.
   doctor:
     build:
       context: .
