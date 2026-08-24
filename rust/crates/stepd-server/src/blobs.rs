@@ -417,9 +417,9 @@ mod tests {
 
     #[test]
     fn a_store_that_could_not_answer_is_not_reported_as_a_digest_mismatch() {
-        // The two conditions Task 4 added: no checksum in the object's
-        // metadata, or a HEAD that never landed. Neither is the app's fault,
-        // and telling it "blob_digest_mismatch" says its upload was corrupt
+        // Two conditions, neither the app's fault: no checksum in the
+        // object's metadata, or a HEAD that never landed. Telling the app
+        // "blob_digest_mismatch" says its upload was corrupt
         // when the truth is the backend could not be asked. A plain Postgres
         // failure lands in the same bucket, for the same reason: `db()` also
         // wraps it as `Error::Store`, and this layer cannot tell the two
