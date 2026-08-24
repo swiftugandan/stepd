@@ -29,6 +29,19 @@ pub enum Error {
     /// Serialisation failure.
     #[error("serde: {0}")]
     Serde(#[from] serde_json::Error),
+
+    /// The thing asked for is not there, and the store is sure of it.
+    ///
+    /// Distinct from `Store`, which also covers "the store could not answer
+    /// at all" (a connection failure, a query error). This variant is for the
+    /// store having answered cleanly with "no such row" — a blob whose
+    /// reservation was collected, or one that was never reserved. Callers
+    /// that need to tell "the store is broken" from "the store said no" have
+    /// had no way to since both arrived as `Store(String)`; a caller matching
+    /// on message text to recover the distinction is a contract the producer
+    /// can break by rewording a log line, with nothing to fail when it does.
+    #[error("not found: {0}")]
+    NotFound(String),
 }
 
 impl Error {
@@ -36,6 +49,8 @@ impl Error {
     ///
     /// Protocol and config errors are the app's or operator's fault and will
     /// fail identically forever, so retrying them only burns dispatch capacity.
+    /// A `NotFound` is the same shape: the row does not exist, and retrying
+    /// the identical read does not change that.
     pub fn is_retryable(&self) -> bool {
         matches!(self, Error::Store(_) | Error::Transport(_))
     }

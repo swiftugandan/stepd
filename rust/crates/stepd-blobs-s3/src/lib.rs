@@ -360,8 +360,14 @@ pub enum BucketCheck {
     /// case, not a failure. See [`S3Backend::check_bucket`] for what this
     /// cannot tell you.
     Reachable,
-    /// The probe returned 403: the endpoint answered, but not for these
-    /// credentials.
+    /// The probe returned 403.
+    ///
+    /// Inconclusive, not damning: real AWS S3 answers `HeadObject` on a
+    /// non-existent key with 403 rather than 404 unless the caller also holds
+    /// bucket-level `s3:ListBucket` — a permission this backend never
+    /// otherwise needs and a least-privileged policy would correctly omit. So
+    /// this same 403 is produced by wrong credentials *and* by exactly-right,
+    /// correctly-scoped ones. See [`S3Backend::check_bucket`].
     Forbidden,
     /// No usable answer — wrong endpoint, network failure, or a status other
     /// than success, 404 or 403.
@@ -384,20 +390,32 @@ impl S3Backend {
     /// `DeleteObject` scoped to `bucket/*`. A policy scoped to exactly what
     /// this backend needs would then make `HeadBucket` answer 403 while every
     /// real transfer succeeds: a correctly least-privileged deployment
-    /// failing its own health check. `HeadObject` on a key nothing will ever
-    /// occupy needs no permission this backend does not already require.
+    /// failing its own health check.
     ///
-    /// The cost of that swap: this cannot tell an absent bucket apart from a
-    /// bucket that exists but holds nothing at the probed key. Both answer
-    /// identically — 404 — to a `HeadObject` for a key that was never there.
-    /// It answers "can these credentials read from where the config says the
-    /// bucket is", not "does the bucket exist"; callers should say so rather
-    /// than imply the stronger claim.
+    /// `HeadObject` does not fully escape that problem, and callers of this
+    /// method must not assume it does. It needs no permission this backend
+    /// does not already require — but on real AWS S3 (confirmed against the
+    /// documented behaviour, not just inferred from the permission model),
+    /// `HeadObject` on a key that does not exist itself answers 403 rather
+    /// than 404 *unless the caller also holds `s3:ListBucket`* — the same
+    /// permission this whole probe exists to avoid requiring. So
+    /// [`BucketCheck::Forbidden`] from this probe does not mean "these
+    /// credentials are wrong"; it means "wrong credentials, or right
+    /// credentials correctly scoped to exactly what this backend uses." A
+    /// caller must treat it as inconclusive, not as a confirmed failure — see
+    /// the variant's own doc comment.
     ///
-    /// For `stepd doctor`: wrong credentials or an unreachable endpoint today
-    /// surface only when an app's first upload fails, a system away from
-    /// whoever configured them. This lets an operator learn it at the same
-    /// moment they learn everything else `doctor` checks.
+    /// The remaining cost, even setting the 403 ambiguity aside: this cannot
+    /// tell an absent bucket apart from a bucket that exists but holds
+    /// nothing at the probed key, since MinIO- and RustFS-style stores answer
+    /// both with 404. It answers "can these credentials read from where the
+    /// config says the bucket is", not "does the bucket exist"; callers
+    /// should say so rather than imply the stronger claim.
+    ///
+    /// For `stepd doctor`: an unreachable endpoint today surfaces only when
+    /// an app's first upload fails, a system away from whoever configured it.
+    /// This lets an operator learn it at the same moment they learn
+    /// everything else `doctor` checks.
     pub async fn check_bucket(&self) -> BucketCheck {
         let key = Self::key(DOCTOR_PROBE_ID);
         let mut action = HeadObject::new(&self.bucket, Some(&self.credentials), &key);

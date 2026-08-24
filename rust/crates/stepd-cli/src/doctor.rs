@@ -387,11 +387,26 @@ async fn s3_bucket_reachable(s3: &stepd_server::S3ConfigInput) -> Finding {
              probe on a key that cannot exist, so this cannot by itself tell an absent \
              bucket apart from a present one that simply has nothing at that key)",
         ),
-        stepd_blobs_s3::BucketCheck::Forbidden => Finding::critical(
+        // A warning, not `critical`: on real AWS S3, `HeadObject` on a
+        // non-existent key answers 403 rather than 404 unless the caller
+        // holds bucket-level `s3:ListBucket` — the same permission this
+        // probe deliberately does not require, and a correctly
+        // least-privileged deployment correctly does not hold. That
+        // deployment is healthy and would fail every check `critical` here
+        // implies it should pass — which is the same failure this probe was
+        // switched from `HeadBucket` to `HeadObject` to remove, just reached
+        // through the outcome instead of the permission. This 403 cannot be
+        // told apart from a real credentials problem, so it is reported as
+        // inconclusive rather than as a confirmed one.
+        stepd_blobs_s3::BucketCheck::Forbidden => Finding::warn(
             "blob-store",
-            "S3 endpoint reachable, but the configured credentials were refused (403)",
-            "check STEPD_BLOB_S3_ACCESS_KEY and STEPD_BLOB_S3_SECRET_KEY; see \
-             docs/blob-backends.md for object stores this backend has been verified against",
+            "S3 endpoint reachable, but this probe got 403 — inconclusive: either the \
+             configured credentials are wrong, or they are correct and simply lack \
+             bucket-level s3:ListBucket, which real AWS S3 also answers with 403 for a \
+             HeadObject on a key that does not exist",
+            "if uploads are actually failing, check STEPD_BLOB_S3_ACCESS_KEY and \
+             STEPD_BLOB_S3_SECRET_KEY; if they are working, this 403 is expected for a \
+             least-privileged policy and can be ignored — see docs/blob-backends.md",
         ),
         stepd_blobs_s3::BucketCheck::Unreachable(detail) => Finding::critical(
             "blob-store",

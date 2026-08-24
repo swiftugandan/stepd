@@ -372,7 +372,7 @@ impl BlobStore for PostgresBlobStore {
         .fetch_optional(&self.pool)
         .await
         .map_err(db)?
-        .ok_or_else(|| Error::Store(format!("no such blob {id}")))?;
+        .ok_or_else(|| Error::NotFound(format!("no such blob {id}")))?;
 
         let declared_size: i64 = row.get("size");
         let declared_digest: Vec<u8> = row.get("sha256");
@@ -385,7 +385,7 @@ impl BlobStore for PostgresBlobStore {
             .backend
             .stored(id)
             .await?
-            .ok_or_else(|| Error::Store(format!("no such blob {id}")))?;
+            .ok_or_else(|| Error::NotFound(format!("no such blob {id}")))?;
 
         if stored.size != declared_size {
             return Err(Error::Config(format!(
