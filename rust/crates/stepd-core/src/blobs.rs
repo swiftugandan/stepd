@@ -116,8 +116,23 @@ pub fn op_blob_ids(op: &Op, out: &mut Vec<Uuid>) {
 }
 
 /// Every `$blob` id carried by an event's payload.
+///
+/// Destructured field by field with no `..`, for the same reason
+/// [`op_blob_ids`] is: `data` is the only JSON `Event` carries today, and a
+/// second one added later should stop the build here rather than quietly go
+/// unwalked.
 pub fn event_blob_ids(event: &Event, out: &mut Vec<Uuid>) {
-    blob_ids(&event.data, out);
+    let Event {
+        specversion: _,
+        id: _,
+        source: _,
+        event_type: _,
+        time: _,
+        data,
+        key: _,
+        idempotency: _,
+    } = event;
+    blob_ids(data, out);
 }
 
 #[cfg(test)]

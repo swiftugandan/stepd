@@ -289,9 +289,19 @@ where
         // before it becomes readable, and "the commit" a mismatch fails is this
         // one — the op commit that puts the reference into the journal. On a
         // backend that presigns there is no other moment: the bytes went
-        // straight from the app to the object store, so a reference nobody
-        // verifies here stays `reserved`, is refused by `presign_read`, and has
-        // its bytes collected once the reservation window elapses.
+        // straight from the app to the object store, so nothing else in the tree
+        // ever calls `commit_blob` for them.
+        //
+        // What that cost before this call existed was not an unreadable
+        // reference. Read URLs are minted by `attach_read_urls` on the
+        // attempt-loading path, which looks at no state at all, so an unverified
+        // blob read back perfectly well and the run worked. It was the 24-hour
+        // sweep: the row was still `state='reserved'`, the collector takes
+        // reserved rows past their window regardless of who references them, and
+        // the run failed on a later attempt with nothing connecting it to a
+        // collection that had run hours earlier. Unverified *and* readable is
+        // also why `docs/adr/010-payload-tiering.md` rejected checking on first
+        // read — by then the run has proceeded on a value nobody checked.
         let refused = match self.verify_blobs(&response.ops, &response.emit).await {
             BlobCheck::Verified => None,
             BlobCheck::Unavailable(error) => {
@@ -416,11 +426,22 @@ where
             let Err(e) = blobs.commit_blob(id).await else {
                 continue;
             };
-            // `Error::is_retryable` already draws this line, and draws it the
-            // same way the server's transfer endpoint does: a store that could
-            // not answer is a gateway failure, a store that answered "these
-            // bytes are not what you declared" or "there is no such blob" is
-            // the app's, and no number of redeliveries changes it.
+            // A store that could not answer is a gateway failure and must not
+            // fail a run: retry it. A store that answered is the app's problem.
+            //
+            // "There is no such blob" is on the non-retryable side by
+            // consequence, not because retrying is mechanically impossible — it
+            // is. `reserve` dedupes only on a *committed* digest, so a
+            // re-executed step would get a fresh id and a fresh upload URL and
+            // could well succeed. What it would cost is the point: the retry
+            // here is not "retry the upload", it is up to `quarantine_after`
+            // re-executions of a side effect the engine knows nothing about, to
+            // rescue a claim the app was better placed to check than we are. A
+            // conforming SDK already errors on a failed PUT rather than
+            // returning the reference (`stepd-sdk/src/blobs.rs`), so a reference
+            // to an object that is not there means a client that did not, and
+            // twenty more attempts will not make it one. It keeps its own code
+            // so an operator can tell it from a digest mismatch.
             if e.is_retryable() {
                 return BlobCheck::Unavailable(ErrorBody::coded(
                     "blob_backend_unavailable",
