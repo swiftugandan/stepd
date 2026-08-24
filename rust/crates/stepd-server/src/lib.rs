@@ -28,6 +28,7 @@ pub mod registry;
 pub mod runner;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -302,6 +303,14 @@ pub struct Server {
     pub dispatcher: Arc<Dispatcher<PostgresStore, PostgresStore, HttpTransport>>,
     /// The convergence loop.
     pub housekeeper: Arc<Housekeeper<PostgresStore, PostgresStore, PostgresStore>>,
+    /// Whether `router()` has already logged the relay start-up warning.
+    ///
+    /// Per-instance, not a `static`: two `Server`s in one process (as the test
+    /// fixtures build) must not share this. `router()` builds a fresh `Router`
+    /// on every call and nothing stops a caller invoking it more than once on
+    /// the same instance; this keeps the warning to one line per instance
+    /// regardless, rather than becoming per-call noise.
+    blob_relay_warned: AtomicBool,
 }
 
 impl Server {
@@ -339,20 +348,12 @@ impl Server {
                 )
                 .with_max_size(config.blob_max_size),
             );
-            // Once, at start-up, naming the backend — not per request, where
-            // this warning already fires (`blobs.rs`'s `write_content`). A
-            // startup line alone would not tell an operator the fallback is
-            // still in use at three in the morning; a per-request line alone
-            // would not tell them their deployment is on the fallback path at
-            // all. §8.3.2 calls the relay a compatibility fallback, and the
-            // filesystem backend is the only one shipped here that needs it.
-            if !blob_store.can_presign() {
-                tracing::warn!(
-                    backend = "filesystem",
-                    "managed-blob backend cannot presign; mounting the protocol §8.3.2 relay \
-                     route, which puts payload bytes through this process on every transfer"
-                );
-            }
+            // The relay start-up warning is logged from `router()`, not here:
+            // `build()` runs for every subcommand (`migrate`, `doctor`,
+            // `token`, `namespace`, `run`, `limits`), most of which never
+            // mount an HTTP route at all, and a warning here would tell an
+            // operator running `doctor` that bytes are being relayed through
+            // a process that never serves a request.
             Some(blob_store)
         } else {
             None
@@ -414,6 +415,7 @@ impl Server {
             config,
             dispatcher,
             housekeeper,
+            blob_relay_warned: AtomicBool::new(false),
         })
     }
 
@@ -425,16 +427,39 @@ impl Server {
 
     /// The HTTP router.
     pub fn router(&self) -> Router {
+        let relay = self
+            .state
+            .blobs
+            .as_ref()
+            .map(|b| !b.can_presign())
+            .unwrap_or(false);
+
+        // Once per serving process, naming the backend — not per request,
+        // where this warning already fires too (`blobs.rs`'s
+        // `write_content`). A start-up line alone would not tell an operator
+        // the fallback is still in use at three in the morning; a
+        // per-request line alone would not tell them their deployment is on
+        // the fallback path at all. §8.3.2 calls the relay a compatibility
+        // fallback, and the filesystem backend is the only one shipped here
+        // that needs it. Guarded so a caller building more than one `Router`
+        // from the same `Server` still gets one line, not one per call.
+        if relay
+            && self
+                .blob_relay_warned
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            tracing::warn!(
+                backend = "filesystem",
+                "managed-blob backend cannot presign; mounting the protocol §8.3.2 relay \
+                 route, which puts payload bytes through this process on every transfer"
+            );
+        }
+
         Router::new()
             .route("/", get(console::serve))
             .merge(api::router())
-            .merge(blobs::router(
-                self.state
-                    .blobs
-                    .as_ref()
-                    .map(|b| !b.can_presign())
-                    .unwrap_or(false),
-            ))
+            .merge(blobs::router(relay))
             .with_state(self.state.clone())
             .layer(tower_http::trace::TraceLayer::new_for_http())
     }
