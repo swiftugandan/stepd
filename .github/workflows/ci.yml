@@ -68,6 +68,37 @@ jobs:
           (cd sdk/rust    && cargo test --workspace)
           (cd engine/rust && cargo test --workspace --lib)
 
+  # ---------------------------------------------------------------- tier 1
+  typescript:
+    name: "tier 1 · typescript (≤60s)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: "**/pnpm-lock.yaml"
+      # One loop, so adding `sdk/typescript` is one line rather than a job.
+      # These packages need no database and no server — that is the whole point
+      # of where they sit — so they belong in the tier that runs on every push
+      # and finishes in a minute.
+      - name: install, typecheck, test, build
+        run: |
+          for w in spec/typescript; do
+            echo "::group::$w"
+            (cd "$w" \
+              && pnpm install --frozen-lockfile \
+              && pnpm typecheck \
+              && pnpm test \
+              && pnpm build)
+            echo "::endgroup::"
+          done
+
   # ---------------------------------------------------------------- boundaries
   boundaries:
     name: "tier 1 · crate boundaries"
