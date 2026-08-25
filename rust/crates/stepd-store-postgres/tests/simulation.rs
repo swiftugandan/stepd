@@ -893,11 +893,12 @@ async fn no_property_is_violated_across_the_seed_budget() {
         failures.join("\n  ")
     );
 
-    // Coverage, not just correctness. README finding 8: `coverage_check.py`
-    // showed cascade cancellation hit zero times across 500 green seeds — the
-    // suite had never exercised a fix that had just been made, and the green
-    // tick said otherwise. A property that never gets the chance to fail is a
-    // vacuous property, so the run reports what it actually reached.
+    // Coverage, not just correctness. RECONCILIATION §7 finding 8:
+    // `coverage_check.py` showed cascade cancellation hit zero times across 500
+    // green seeds — the suite had never exercised a fix that had just been
+    // made, and the green tick said otherwise. A property that never gets the
+    // chance to fail is a vacuous property, so the run reports what it actually
+    // reached.
     let (fires, skips, dupes): (i64, i64, i64) = sqlx::query_as(
         "SELECT count(*) FILTER (WHERE outcome = 'fired'),
                 count(*) FILTER (WHERE outcome <> 'fired'),
@@ -1023,7 +1024,7 @@ async fn p10_fires_when_an_occurrence_is_created_twice() {
     // The positive control for P10. Without one, "P10 never fired across ten
     // thousand seeds" and "P10 checks nothing" are the same observation, and
     // this project has already been caught once by a property that was green
-    // because it never ran (README finding 8).
+    // because it never ran (RECONCILIATION §7 finding 8).
     //
     // The double fire is produced by writing the second run directly, which is
     // the only way to get one: the ledger's primary key makes the supported path

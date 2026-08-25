@@ -61,9 +61,9 @@ $fn$;
 -- ---------------------------------------------------------------------------
 -- Structural invariants for the ops added in migration 006.
 --
--- These are the countermeasure to README finding (1): correctness that rests on
--- an undocumented accident. Each one fails the build if a future edit removes a
--- property that no behavioural test would notice going missing.
+-- These are the countermeasure to RECONCILIATION §7 finding 1: correctness
+-- that rests on an undocumented accident. Each one fails the build if a future
+-- edit removes a property that no behavioural test would notice going missing.
 -- ---------------------------------------------------------------------------
 DO $$
 DECLARE src text; v_n int;

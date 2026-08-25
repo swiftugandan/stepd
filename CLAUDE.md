@@ -1,9 +1,10 @@
 # CLAUDE.md
 
 Durable workflow engine: Rust workspace in `rust/`, wire protocol in `spec/`.
-Read [`README.md`](README.md) for status and the honest gaps before changing
-anything; [`rust/README.md`](rust/README.md) for the crate graph and the test
-layout.
+Read [`README.md`](README.md) for status before changing anything, and the
+[`gap`-labelled issues](https://github.com/swiftugandan/stepd/issues?q=is%3Aissue+is%3Aopen+label%3Agap)
+for the known gaps — they live in the tracker, not in the README.
+[`rust/README.md`](rust/README.md) has the crate graph and the test layout.
 
 ## Commands
 
@@ -85,9 +86,10 @@ say which issue a change closes.
 
 | | |
 |---|---|
-| [`README.md`](README.md) | Status, honest gaps, and the findings behind them |
+| [`README.md`](README.md) | Status, how to run it, and how to write a workflow |
 | [`rust/README.md`](rust/README.md) | Crate graph, test layout, running the server |
 | [`spec/PROTOCOL.md`](spec/PROTOCOL.md) | The wire protocol |
 | [`docs/adr/`](docs/adr/) | ADRs; the silent-corruption ones are eager occurrence claiming, the durable run inbox and pooler-safe locking |
 | [`docs/runbooks/restore-hazard.md`](docs/runbooks/restore-hazard.md) | Read before you need it: PITR re-executes side effects |
 | [`docs/GAPS.md`](docs/GAPS.md) | Gap register — note it records spec resolutions, not always code |
+| [`docs/RECONCILIATION.md`](docs/RECONCILIATION.md) | The defects found and fixed, and §7 — the findings worth carrying forward |

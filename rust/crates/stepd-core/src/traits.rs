@@ -347,8 +347,8 @@ pub trait Housekeeping: Send + Sync + 'static {
 ///
 /// That split is not stylistic. The last time engine logic grew inside a storage
 /// crate, this project ended up with two correctness centres and structural
-/// tests guarding the one that was not running (README finding 2). Three live
-/// defects were sitting in the other one.
+/// tests guarding the one that was not running (RECONCILIATION §7 finding 2).
+/// Three live defects were sitting in the other one.
 #[async_trait]
 pub trait CronStore: Send + Sync + 'static {
     /// Claim due schedules, plan them, fire what should fire, advance them.

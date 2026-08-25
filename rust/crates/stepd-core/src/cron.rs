@@ -647,10 +647,10 @@ pub fn decide(
 // The transactional dance around it — claim rows, apply, advance, commit —
 // belongs to whatever is storing the schedules. The *decisions* do not. This
 // project has already paid once for letting a storage crate grow its own copy
-// of engine logic (README finding 2: two correctness centres, and the tests
-// guarded the one that was not running), so the planner is here, where it can
-// be tested against a table of times with no database in the room, and the
-// store executes what it is handed.
+// of engine logic (RECONCILIATION §7 finding 2: two correctness centres, and
+// the tests guarded the one that was not running), so the planner is here,
+// where it can be tested against a table of times with no database in the room,
+// and the store executes what it is handed.
 
 /// A schedule that has come due, as the planner needs it.
 ///
