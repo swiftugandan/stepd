@@ -16,17 +16,11 @@ function isObject(v: unknown): v is Record<string, unknown> {
 }
 
 /**
- * Read an attempt request, leniently where the specification and the wire
- * disagree.
+ * Read an attempt request.
  *
- * `spec/schemas/attempt-request.schema.json` types `fence` as a string; the
- * server sends an integer. Both are accepted here and normalised to a number,
- * because an SDK that took either side literally would fail against the other,
- * and which of them is the defect is not this decoder's business to decide.
- *
- * Unknown fields are ignored (§11). Missing *required* fields are not: an
- * attempt with no `run.id` cannot be replayed against anything, and guessing
- * would be worse than the 400 this produces.
+ * `fence` is an integer on the wire. Unknown fields are ignored (§11). Missing
+ * required fields are not: an attempt with no `run.id` cannot be replayed
+ * against anything, and guessing would be worse than the 400 this produces.
  */
 export function decodeAttempt(raw: unknown): DecodeResult {
   if (!isObject(raw)) return { ok: false, error: { kind: 'not_an_object' } };
@@ -36,17 +30,15 @@ export function decodeAttempt(raw: unknown): DecodeResult {
   }
 
   let fence: number;
-  if (typeof raw.fence === 'number') {
+  if (typeof raw.fence === 'number' && Number.isInteger(raw.fence)) {
     fence = raw.fence;
-  } else if (typeof raw.fence === 'string' && /^-?\d+$/.test(raw.fence)) {
-    fence = Number(raw.fence);
   } else {
     return {
       ok: false,
       error: {
         kind: 'bad_field',
         field: 'fence',
-        why: 'expected an integer, or a string holding one',
+        why: 'expected an integer',
       },
     };
   }
@@ -64,6 +56,10 @@ export function decodeAttempt(raw: unknown): DecodeResult {
   }
 
   const run = raw.run;
+  if (typeof run.lineage_id !== 'string') {
+    return { ok: false, error: { kind: 'missing', field: 'run.lineage_id' } };
+  }
+
   const attempt: Attempt = {
     protocol: PROTOCOL_VERSION,
     attempt: raw.attempt,
@@ -76,12 +72,14 @@ export function decodeAttempt(raw: unknown): DecodeResult {
       key: typeof run.key === 'string' ? run.key : null,
       started_at: run.started_at as string,
       input: run.input as Attempt['run']['input'],
-      // Required by the crate and optional in the schema. Defaulted to the run
-      // id, which is what it is for a run that never continued as new.
-      lineage_id: typeof run.lineage_id === 'string' ? run.lineage_id : (run.id as string),
+      lineage_id: run.lineage_id,
       chain_position: typeof run.chain_position === 'number' ? run.chain_position : 0,
       cancelling: run.cancelling === true,
     },
+    // Passed through. The CloudEvent extensions are `stepdkey` /
+    // `stepdidempotency` on the wire; renaming them to `key` would make
+    // `event.key` look populated in TypeScript while ingest still reads
+    // `stepdkey` and drops the business key.
     events: Array.isArray(raw.events) ? (raw.events as Attempt['events']) : [],
     // Only completed or terminally-failed steps ever arrive here; a pending row
     // would make the handler treat an unresolved sleep as already done.

@@ -1,0 +1,7 @@
+{
+  "type": "about:blank",
+  "title": "Bad request",
+  "status": 400,
+  "detail": "cursor is not a uuid",
+  "code": "bad_cursor"
+}

@@ -20,9 +20,8 @@
       "minimum": 1
     },
     "fence": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 128
+      "type": "integer",
+      "description": "Monotonic fencing token for this attempt. Echoed on commit; a stale value is discarded (§7.3)."
     },
     "deadline": {
       "$ref": "common.schema.json#/$defs/timestamp"
@@ -33,7 +32,8 @@
         "id",
         "function_id",
         "namespace",
-        "started_at"
+        "started_at",
+        "lineage_id"
       ],
       "additionalProperties": false,
       "properties": {
@@ -42,9 +42,6 @@
         },
         "function_id": {
           "$ref": "common.schema.json#/$defs/identifier"
-        },
-        "function_version": {
-          "type": "string"
         },
         "namespace": {
           "$ref": "common.schema.json#/$defs/identifier"
@@ -66,27 +63,6 @@
           "type": "boolean",
           "default": false
         },
-        "parent": {
-          "type": [
-            "object",
-            "null"
-          ],
-          "required": [
-            "run_id"
-          ],
-          "additionalProperties": false,
-          "properties": {
-            "run_id": {
-              "$ref": "common.schema.json#/$defs/uuidv7"
-            },
-            "step_hash": {
-              "$ref": "common.schema.json#/$defs/stepHash"
-            },
-            "function_id": {
-              "$ref": "common.schema.json#/$defs/identifier"
-            }
-          }
-        },
         "lineage_id": {
           "$ref": "common.schema.json#/$defs/uuidv7",
           "description": "Stable across a continue_as_new chain"
@@ -95,10 +71,6 @@
           "type": "integer",
           "minimum": 0,
           "description": "0 for the first run in a chain; increments on each continue_as_new"
-        },
-        "deadline": {
-          "$ref": "common.schema.json#/$defs/timestamp",
-          "description": "Run-level deadline from timeouts.run, if set"
         }
       }
     },
@@ -122,9 +94,6 @@
     "state_truncated": {
       "type": "boolean",
       "default": false
-    },
-    "state_cursor": {
-      "type": "string"
     }
   },
   "$defs": {
@@ -164,16 +133,6 @@
         },
         "error": {
           "$ref": "common.schema.json#/$defs/error"
-        },
-        "timed_out": {
-          "type": "boolean"
-        },
-        "completed_at": {
-          "$ref": "common.schema.json#/$defs/timestamp"
-        },
-        "attempts": {
-          "type": "integer",
-          "minimum": 1
         }
       }
     }

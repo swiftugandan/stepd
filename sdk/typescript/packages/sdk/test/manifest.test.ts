@@ -15,9 +15,8 @@ describe('manifest', () => {
   });
 
   it('sorts functions by id, so the checksum is a function of content', () => {
-    const m = build().manifest() as Record<string, unknown>;
-    const ids = (m.functions as Array<Record<string, unknown>>).map((f) => f.id);
-    expect(ids).toEqual(['a', 'b']);
+    const m = build().manifest();
+    expect(m.functions.map((f) => f.id)).toEqual(['a', 'b']);
   });
 
   it('changes when a function changes', () => {
@@ -25,19 +24,15 @@ describe('manifest', () => {
       .signingKey('k')
       .function(fn('b').onEvent('different').run(() => null))
       .function(fn('a').onEvent('e').run(() => null));
-    const a = (build().manifest() as Record<string, unknown>).checksum;
-    const b = (other.manifest() as Record<string, unknown>).checksum;
-    expect(a).not.toBe(b);
+    expect(build().manifest().checksum).not.toBe(other.manifest().checksum);
   });
 
   it('has a checksum the schema accepts', () => {
-    const m = build().manifest() as Record<string, unknown>;
-    expect(m.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(build().manifest().checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
   it('carries an sdk identifier the schema accepts', () => {
-    const m = build().manifest() as Record<string, unknown>;
-    expect(m.sdk).toMatch(/^[a-z0-9_-]+\/[0-9A-Za-z.+-]+$/);
+    expect(build().manifest().sdk).toMatch(/^[a-z0-9_-]+\/[0-9A-Za-z.+-]+$/);
   });
 
   it('never contains the signing key', () => {
@@ -54,8 +49,7 @@ describe('manifest', () => {
   });
 
   it('carries the defaults, so an operator can see what they were', () => {
-    const m = build().manifest() as Record<string, unknown>;
-    const [first] = m.functions as Array<Record<string, unknown>>;
+    const [first] = build().manifest().functions;
     expect(first!.retries).toEqual({
       max_attempts: 4,
       backoff: 'exponential',
@@ -70,8 +64,8 @@ describe('manifest', () => {
 describe('cron triggers', () => {
   it('requires a zone rather than defaulting to UTC', () => {
     const f = fn('nightly').onCron('0 3 * * *', 'Europe/London').run(() => null);
-    const config = f.config() as Record<string, unknown>;
-    expect((config.triggers as Array<Record<string, unknown>>)[0]).toEqual({
+    const config = f.config();
+    expect(config.triggers[0]).toEqual({
       type: 'cron',
       cron: '0 3 * * *',
       tz: 'Europe/London',
@@ -87,8 +81,7 @@ describe('cron triggers', () => {
         singleton: 'billing',
       })
       .run(() => null);
-    const config = f.config() as Record<string, unknown>;
-    expect((config.triggers as Array<Record<string, unknown>>)[0]).toEqual({
+    expect(f.config().triggers[0]).toEqual({
       type: 'cron',
       cron: '0 3 * * *',
       tz: 'Europe/London',

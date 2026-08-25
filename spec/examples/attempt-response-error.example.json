@@ -1,5 +1,5 @@
 {
   "protocol": "1",
-  "ops": [ { "op": "error", "retryable": true, "step": "charge", "hash": "3f2a91c4b70e1d55",
-             "error": { "code": "gateway_down", "message": "upstream 503", "retry_after": "PT30S", "attempts": 2 } } ]
+  "ops": [ { "op": "error", "retryable": true, "step": "charge",
+             "error": { "code": "gateway_down", "message": "upstream 503", "attempts": 2 } } ]
 }

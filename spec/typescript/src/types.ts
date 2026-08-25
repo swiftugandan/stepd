@@ -1,12 +1,10 @@
 /**
  * The wire types of `spec/PROTOCOL.md`.
  *
- * These mirror `stepd-proto`, not `spec/schemas/`. The two disagree in about a
- * dozen places — `fence` is a string in the schema and an integer on the wire,
- * `sleep` accepts `duration` in the schema and only `until` on the wire,
- * `wait_event` carries `expr`/`timeout` in the schema and `timeout_at` and no
- * `expr` on the wire — and the server parses the crate. An SDK written from the
- * schemas alone does not interoperate today. See `spec/rust/README.md`.
+ * These match `stepd-proto` and `spec/schemas/`. Committed examples under
+ * `spec/examples/` are the documents all three artefacts must accept.
+ * Registration, blob-reserve, problem and conformance types live in
+ * `manifest.ts`.
  */
 
 /** The protocol major version, as it appears on the wire: a string, not a number. */
@@ -50,7 +48,6 @@ export interface ExternalRef {
     size?: number;
     sha256?: string;
     content_type?: string;
-    filename?: string;
     meta?: Record<string, Json>;
   };
 }
@@ -60,12 +57,17 @@ export interface ErrorBody {
   code?: string;
   message: string;
   stack?: string;
-  retry_after?: string;
   attempts?: number;
-  data?: Json;
 }
 
-/** A CloudEvent in structured mode, with the `stepd*` extensions (§3). */
+/**
+ * A CloudEvent in structured mode, with the `stepd*` extensions (§4.1).
+ *
+ * These are JSON field names. The Rust binding maps `stepdkey` onto a struct
+ * field called `key`; this type does not. A property named `key` here is an
+ * extra JSON key the engine ignores (§11), and the business key is dropped.
+ * `RunContext.key` is a different field: the run's business key on the attempt.
+ */
 export interface Event {
   specversion: string;
   id?: string | null;
@@ -73,8 +75,8 @@ export interface Event {
   type: string;
   time?: string | null;
   data: Json;
-  key?: string | null;
-  idempotency?: string | null;
+  stepdkey?: string | null;
+  stepdidempotency?: string | null;
 }
 
 /** Which op recorded a step. */

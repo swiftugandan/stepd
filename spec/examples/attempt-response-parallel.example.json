@@ -3,16 +3,14 @@
   "ops": [
     { "op": "step", "id": "ship", "hash": "1122334455667788",
       "data": { "carrier": "dhl", "tracking": "JD01" },
-      "started_at": "2026-08-20T10:00:03Z", "ended_at": "2026-08-20T10:00:04Z",
       "meta": { "tool": "shipping-api" } },
     { "op": "invoke", "id": "invoice", "hash": "aabbccddeeff0011",
       "function": "billing/issue-invoice", "input": { "order": 4711 },
-      "timeout": "PT1H", "detach": false }
+      "detach": false }
   ],
   "emit": [
     { "specversion": "1.0", "id": "evt_out1", "source": "/fn/order-fulfilment",
       "type": "order.shipped", "data": { "order_id": 4711 } }
   ],
-  "logs": [ { "level": "info", "message": "shipped via dhl", "step": "ship" } ],
-  "diagnostics": { "orphaned_steps": 0, "replay_ms": 1.8, "steps_replayed": 4 }
+  "orphaned_steps": 0
 }

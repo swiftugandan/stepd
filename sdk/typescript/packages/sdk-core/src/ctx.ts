@@ -130,7 +130,12 @@ export class Ctx {
 
   // ------------------------------------------------------------ side channels
 
-  /** Publish an event in the same transaction that commits this pass's ops. */
+  /**
+   * Publish an event in the same transaction that commits this pass's ops.
+   *
+   * The envelope is a CloudEvent. The business key is `stepdkey`, not `key`
+   * — a `key` field is ignored on ingest. `ctx.run.key` is the run's key.
+   */
   emit(event: Event): void {
     this.#emit.push(event);
   }

@@ -9,7 +9,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use stepd_proto::{sig, Attempt, AttemptResponse, Op, PROTOCOL_VERSION};
+use stepd_proto::{sig, AppManifest, Attempt, AttemptResponse, Op, PROTOCOL_VERSION};
 use tracing::{debug, warn};
 
 use crate::function::App;
@@ -197,7 +197,7 @@ impl App {
     }
 }
 
-async fn manifest(State(state): State<Arc<ServeState>>) -> Json<serde_json::Value> {
+async fn manifest(State(state): State<Arc<ServeState>>) -> Json<AppManifest> {
     Json(state.app.manifest())
 }
 

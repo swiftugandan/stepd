@@ -160,19 +160,7 @@ impl Default for Options {
 }
 
 /// What the app said it implements (§12.1).
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct ConformanceManifest {
-    /// Protocol major.
-    pub protocol: String,
-    /// Informational language/version string.
-    #[serde(default)]
-    pub sdk: Option<String>,
-    /// Suites the app claims.
-    pub suites: Vec<String>,
-    /// Hazards the app says it makes unrepresentable rather than detectable.
-    #[serde(default)]
-    pub statically_prevented: Vec<String>,
-}
+pub use stepd_proto::ConformanceManifest;
 
 /// A server, an app, and the means to drive one against the other.
 pub struct Harness {
@@ -303,7 +291,7 @@ impl Harness {
 
     /// Whether the app declared `suite`.
     pub fn declares(&self, suite: &str) -> bool {
-        self.manifest.suites.iter().any(|s| s == suite)
+        self.manifest.suites.iter().any(|s| s.as_str() == suite)
     }
 
     /// Whether the app says it makes `hazard` unrepresentable (§12.1).
@@ -311,7 +299,7 @@ impl Harness {
         self.manifest
             .statically_prevented
             .iter()
-            .any(|s| s == hazard)
+            .any(|s| s.as_str() == hazard)
     }
 
     /// Pull the app's `AppManifest` and register it through the real API path.

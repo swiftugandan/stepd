@@ -461,7 +461,7 @@ evidence of what was true when it was taken.
 
 | Layer | Count | Needs a database |
 |---|---|---|
-| Protocol schema cases (`spec/validate.py`) | 54 | no |
+| Protocol schema cases (`spec/validate.py`) | 59 | no |
 | Rust unit tests (`cargo test --workspace --lib`) | 200 | no |
 | Engine tests against in-memory fakes (`stepd-core/tests/engine.rs`) | 19 | no |
 | SQL behavioural assertions (`test_engine.sql`, `test_engine_ops.sql`, `test_cron.sql`) | 25 + 94 + 47 | yes |

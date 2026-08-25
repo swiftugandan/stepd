@@ -33,8 +33,9 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use stepd_core::traits::{BlobSpec, BlobStore, Reservation};
+use stepd_proto::{BlobReserveRequest, BlobReserveResponse};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -59,51 +60,11 @@ pub fn router(relay: bool) -> Router<ServerState> {
 }
 
 /// `POST /v1/blobs:reserve` — phase one of the two-phase upload.
-#[derive(Debug, Deserialize)]
-pub struct ReserveRequest {
-    /// The run the blob will belong to. Scopes the reservation to a namespace.
-    pub run_id: Uuid,
-    /// Step this will be attached to. Informational.
-    #[serde(default)]
-    pub step_id: Option<String>,
-    /// Declared size in bytes.
-    pub size: i64,
-    /// Lowercase hex SHA-256 of the content.
-    pub sha256: String,
-    /// Media type.
-    #[serde(default)]
-    pub content_type: Option<String>,
-    /// Original filename, presentational only.
-    #[serde(default)]
-    pub filename: Option<String>,
-}
-
-/// The reservation, as `blob-reserve.schema.json#/$defs/response`.
-#[derive(Debug, Serialize)]
-pub struct ReserveResponse {
-    /// Assigned id.
-    pub blob_id: Uuid,
-    /// True when the digest already exists here and the app must skip the upload.
-    pub deduplicated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    /// Write-scoped URL. Absent when deduplicated.
-    pub upload_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    /// Method to use for the upload.
-    pub method: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    /// Headers the app must send verbatim.
-    pub headers: Option<std::collections::BTreeMap<String, String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    /// When the URL stops working.
-    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
 async fn reserve(
     State(state): State<ServerState>,
     principal: Principal,
-    Json(req): Json<ReserveRequest>,
-) -> ApiResult<(StatusCode, Json<ReserveResponse>)> {
+    Json(req): Json<BlobReserveRequest>,
+) -> ApiResult<(StatusCode, Json<BlobReserveResponse>)> {
     principal.require(Role::Operator)?;
     let blobs = state.blobs()?;
 
@@ -143,13 +104,14 @@ async fn reserve(
     match blobs.reserve(&principal.namespace, spec).await {
         Ok(Reservation::Deduplicated { id }) => Ok((
             StatusCode::OK,
-            Json(ReserveResponse {
+            Json(BlobReserveResponse {
                 blob_id: id,
                 deduplicated: true,
                 upload_url: None,
                 method: None,
                 headers: None,
                 expires_at: None,
+                relay: false,
             }),
         )),
         Ok(Reservation::Upload {
@@ -160,13 +122,14 @@ async fn reserve(
             expires_at,
         }) => Ok((
             StatusCode::CREATED,
-            Json(ReserveResponse {
+            Json(BlobReserveResponse {
                 blob_id: id,
                 deduplicated: false,
                 upload_url: Some(url),
                 method: Some(method),
                 headers: Some(headers.into_iter().collect()),
                 expires_at: Some(expires_at),
+                relay: false,
             }),
         )),
         // The ceiling is a `payload_too_large`, and it says what to do instead:

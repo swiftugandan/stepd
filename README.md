@@ -50,10 +50,10 @@ engine crates ([ADR-024](docs/adr/024-language-trees.md)).
 
 | Component | State | Evidence |
 |---|---|---|
-| Protocol spec (rev 1.2) | Complete | 54 schema cases — `spec/validate.py` |
+| Protocol spec (rev 1.3) | Complete | 59 schema cases — `spec/validate.py`; wire examples also parsed by `stepd-proto` |
 | Postgres schema + engine SQL | Complete | 166 behavioural + 27 structural assertions |
-| `stepd-proto` | Complete | 36 tests, plus the cross-language fixtures |
-| `@stepd/protocol` | Complete | 103 tests; agrees with `stepd-proto` on 20 committed vectors |
+| `stepd-proto` | Complete | 48 tests (lib, examples, schema lattice), plus the cross-language fixtures |
+| `@stepd/protocol` | Complete | 122 tests; agrees with `stepd-proto` on 20 committed vectors |
 | `@stepd/sdk-core` | Complete | 76 tests — the replay machinery |
 | `@stepd/sdk` | Complete | 64 tests, including the in-process workflow harness; the TypeScript app reaches **level 2**, 28/28 cases |
 | `stepd-core` | Complete | 72 tests, in-memory fakes for every interface |

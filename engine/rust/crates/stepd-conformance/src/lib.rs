@@ -54,7 +54,12 @@ pub async fn run(options: Options) -> anyhow::Result<Report> {
             .context("the app under test did not accept its configuration")?;
     }
     let mut report = Report {
-        declared: harness.manifest.suites.clone(),
+        declared: harness
+            .manifest
+            .suites
+            .iter()
+            .map(|s| s.as_str().to_string())
+            .collect(),
         sdk: harness.manifest.sdk.clone(),
         ..Default::default()
     };

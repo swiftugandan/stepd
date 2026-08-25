@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Protocol version | `1` |
-| Spec revision | 1.2 |
+| Spec revision | 1.3 |
 | Status | Draft |
 | Licence | Apache-2.0 |
 | Media type | `application/json` |
@@ -154,22 +154,23 @@ one that is keeping up are otherwise indistinguishable from the run history.
 {
   "protocol": "1",
   "attempt": 7,
-  "fence": "01J8…",                       // opaque; echo in ingest calls made during the attempt
+  "fence": 7,                             // monotonic integer; a stale value is discarded (§7.3)
   "run": {
-    "id": "01J8ZQ…",                      // UUIDv7
+    "id": "01926f5a-1c40-7c9a-9f3e-2b7d4e6a8c10",  // UUIDv7
     "function_id": "order-fulfilment",
     "namespace": "prod",
     "key": "order:4711",                  // null if unkeyed
     "started_at": "2026-08-19T10:00:00Z",
-    "parent": { "run_id": "01J8Z…", "step_hash": "3f2a…" },   // null if root
+    "lineage_id": "01926f5a-1c40-7c9a-9f3e-2b7d4e6a8c10",
+    "chain_position": 0,
     "input": { }                          // for invoke-triggered runs
   },
-  "events": [ { /* CloudEvent, structured mode */ } ],   // 1..n (n>1 only for batched triggers)
+  "events": [ { /* CloudEvent, structured mode; see §4.1 */ } ],   // 1..n (n>1 only for batched triggers)
   "steps": {
-    "3f2a91c4": { "id": "charge",   "op": "step",       "status": "completed", "data": { "tx": "ch_1" } },
-    "a71bd0e2": { "id": "cooldown", "op": "sleep",      "status": "completed" },
-    "c0ff3312": { "id": "approval", "op": "wait_event", "status": "completed", "data": { /* CloudEvent */ } },
-    "9d1e77aa": { "id": "refund",   "op": "step",       "status": "failed",
+    "3f2a91c4b70e1d55": { "id": "charge",   "op": "step",       "status": "completed", "data": { "tx": "ch_1" } },
+    "a71bd0e2ff34c918": { "id": "cooldown", "op": "sleep",      "status": "completed" },
+    "c0ff3312aa10bb47": { "id": "approval", "op": "wait_event", "status": "completed", "data": { /* CloudEvent */ } },
+    "9d1e77aa02c4e6f1": { "id": "refund",   "op": "step",       "status": "failed",
                   "error": { "code": "gateway_down", "message": "…", "attempts": 3 } }
   },
   "state_truncated": false,               // true if `steps` is paginated (§8.3)
@@ -183,6 +184,17 @@ Rules:
 * Step `data` MAY be replaced by a blob reference (§8.2).
 * The SDK MUST treat unknown fields as forward-compatible and ignore them.
 
+### 4.1 Event envelope
+
+Events on the attempt (`events`), in a completed `wait_event` result, on `signal`, and in `emit` are CloudEvents 1.0 in structured-mode JSON (`schemas/event.schema.json`). `specversion`, `id`, `source`, `type`, `time` and `data` carry their standard meanings. The engine-specific fields are CloudEvents extension attributes (lowercase, alphanumeric, no separators):
+
+| Attribute | Meaning |
+|---|---|
+| `stepdkey` | Business key; overrides the function's `key_expr` |
+| `stepdidempotency` | Ingest deduplication key |
+
+A producer that already knows the business key sets `stepdkey` rather than encoding it so `key_expr` can rediscover it. A field named `key` or `idempotency` on an event is an unknown extra key (§11) and is ignored: ingest will not key or dedupe on it. `run.key` on the attempt is a different field — the run's business key, already resolved.
+
 ## 5. Response: op envelope (app → server)
 
 `AttemptResponse` (`schemas/attempt-response.schema.json`):
@@ -192,7 +204,7 @@ Rules:
   "protocol": "1",
   "ops": [ /* 1..n Op objects; >1 only for parallel step discovery */ ],
   "emit": [ /* 0..n CloudEvents to publish transactionally with the ops */ ],
-  "logs": [ { "level": "info", "message": "…", "at": "…", "step": "charge" } ]
+  "orphaned_steps": 0                      // recorded hashes this pass never encountered
 }
 ```
 
@@ -202,8 +214,8 @@ Every op carries `id` (developer-supplied, stable) and `hash` (§6). `hash` MUST
 
 #### `step` — record a unit of work that reached a terminal outcome
 ```jsonc
-{ "op": "step", "id": "charge", "hash": "3f2a91c4", "data": { "tx": "ch_1" },
-  "started_at": "…", "ended_at": "…", "meta": { "tokens_in": 812, "cost_usd": 0.014 } }
+{ "op": "step", "id": "charge", "hash": "3f2a91c4b70e1d55", "data": { "tx": "ch_1" },
+  "meta": { "tokens_in": 812, "cost_usd": 0.014 } }
 ```
 The SDK executed the closure during this attempt. The server MUST persist `data` and schedule the next attempt immediately.
 
@@ -211,7 +223,7 @@ A step whose body raised **non-retryably** is also an outcome, and carries `erro
 instead of `data`:
 
 ```jsonc
-{ "op": "step", "id": "charge", "hash": "3f2a91c4",
+{ "op": "step", "id": "charge", "hash": "3f2a91c4b70e1d55",
   "error": { "code": "card_declined", "message": "…" } }
 ```
 
@@ -227,20 +239,21 @@ does not commit.
 
 #### `sleep` — durable timer
 ```jsonc
-{ "op": "sleep", "id": "cooldown", "hash": "a71bd0e2", "until": "2026-09-01T00:00:00Z" }
+{ "op": "sleep", "id": "cooldown", "hash": "a71bd0e2ff34c918", "until": "2026-09-01T00:00:00Z" }
 ```
-Either `until` (RFC 3339) or `duration` (ISO 8601, e.g. `P7D`). Server schedules the next attempt at wake time. Result on replay is `null`.
+`until` is an RFC 3339 timestamp. SDKs that take a duration in their API MUST convert it to an absolute `until` before emitting the op. Server schedules the next attempt at wake time. Result on replay is `null`.
 
 #### `wait_event` — suspend for a matching event
 ```jsonc
-{ "op": "wait_event", "id": "approval", "hash": "c0ff3312",
+{ "op": "wait_event", "id": "approval", "hash": "c0ff3312aa10bb47",
   "event": "order.approved",
-  "expr": "event.data.order_id == run.key_suffix",
-  "timeout": "P7D",
+  "timeout_at": "2026-08-26T10:00:00Z",
   "since": "run_start",
   "prompt": { "title": "Approve refund", "detail": { "amount": 4200 } } }
 ```
-`prompt` is OPTIONAL, purely presentational, and surfaces the pending decision in the console. On match the event is memoized as the step result; on timeout the result is `null` with `"timed_out": true`.
+Matching is by `event` type against the run inbox. `prompt` is OPTIONAL, purely presentational, and surfaces the pending decision in the console. On match the event is memoized as the step result; on timeout the result is `null` with status `timed_out`.
+
+SDKs that take a timeout duration MUST convert it to an absolute `timeout_at` before emitting.
 
 `since` controls the **matching window** and defaults to `run_start` (see §7.6). Values:
 `run_start` (match events received at or after the run began), `registration` (only events
@@ -249,9 +262,9 @@ one that prevents the lost-signal race.
 
 #### `invoke` — call another function as a child run
 ```jsonc
-{ "op": "invoke", "id": "refund", "hash": "9d1e77aa",
+{ "op": "invoke", "id": "refund", "hash": "9d1e77aa02c4e6f1",
   "function": "refunds/issue", "input": { "order": 4711 },
-  "timeout": "PT1H", "detach": false }
+  "detach": false }
 ```
 `detach: true` fires and forgets (result memoized immediately as the child run id).
 
@@ -263,8 +276,8 @@ one that prevents the lost-signal race.
 #### `continue_as_new` — close this run and start a successor
 
 ```jsonc
-{ "op": "continue_as_new", "id": "next-cycle", "hash": "d4…",
-  "input": { "cursor": 41200 }, "carry": ["subscription_id"] }
+{ "op": "continue_as_new", "id": "next-cycle", "hash": "d4d4d4d4d4d4d4d4",
+  "input": { "cursor": 41200 } }
 ```
 
 Closes the current run as `completed` and atomically creates a successor with the same
@@ -272,8 +285,6 @@ function, key and lineage. Journal state is **not** carried over: the successor 
 an empty step map, which is the point — this is how unbounded loops keep run state finite.
 
 * `input` becomes the successor's `run.input`.
-* `carry` OPTIONALLY names step ids whose results are copied into the successor's input under
-  `carried`, as a convenience.
 * `lineage_id` is preserved across the chain; `chain_position` increments.
 * The successor inherits the key, so keyed ordering is unbroken — no other run may slip in
   between predecessor and successor.
@@ -300,7 +311,7 @@ the inline-state limit. SDKs SHOULD warn when either threshold is crossed.
 #### `error` — handler raised
 ```jsonc
 { "op": "error", "retryable": true, "step": "charge",
-  "error": { "code": "gateway_down", "message": "…", "stack": "…", "retry_after": "PT30S" } }
+  "error": { "code": "gateway_down", "message": "…", "stack": "…", "attempts": 2 } }
 ```
 `retryable: false` terminates the run immediately as `failed`.
 
@@ -455,7 +466,7 @@ Conformance suite `loops` and `parallel` both assert these properties (§12).
 | Rename a step id | Treated as a new step; the old result is orphaned (re-executes side effects — **avoid**) |
 | Reorder steps | Safe unless it changes occurrence counters for a repeated id |
 
-SDKs SHOULD warn when a memoized hash present in `steps` is not encountered during a replay pass (`orphaned step`) and MUST include the count in `logs`.
+SDKs SHOULD warn when a memoized hash present in `steps` is not encountered during a replay pass (`orphaned step`) and MUST include the count as `orphaned_steps` on the envelope.
 
 ## 7. Delivery semantics
 
@@ -558,7 +569,7 @@ that removes or defers it would silently reopen an R1 race. Take the run row loc
 deliberately, as the first statement of both paths.)
 
 When a `wait_event` op commits, the server MUST, in the same transaction:
-1. Evaluate the inbox for entries matching `event` and `expr`, restricted by `since`.
+1. Evaluate the inbox for entries matching `event`, restricted by `since`.
 2. If one or more match, resolve the wait immediately with the **earliest** matching entry
    and consume it. The next attempt is scheduled at once; the run never suspends.
 3. Otherwise register the wait and suspend.
@@ -733,9 +744,9 @@ All `*_expr` fields are **CEL** (Common Expression Language). Available bindings
 
 | Binding | Type | Available in |
 |---|---|---|
-| `event` | map (CloudEvent, with `data`) | triggers, key, cancel_on, wait_event |
+| `event` | map (CloudEvent as on the wire: `type`, `data`, `stepdkey`, …) | triggers, key, cancel_on |
 | `events` | list | batched triggers |
-| `run.id`, `run.key`, `run.key_suffix`, `run.function_id` | string | cancel_on, wait_event |
+| `run.id`, `run.key`, `run.key_suffix`, `run.function_id` | string | cancel_on |
 | `now` | timestamp | all |
 
 Expressions MUST evaluate within 1 ms and MUST be side-effect free. Evaluation errors are treated as `false` (non-match) and reported as function health warnings.
@@ -770,7 +781,7 @@ Expressions MUST evaluate within 1 ms and MUST be side-effect free. Evaluation e
 | `determinism` | Hashes assigned in program order; a step created off the sequential path fails non-retryably; repeated id inside a parallel group raises `ambiguous_step_id` (§6.1) |
 | `parallel` | Multiple ops in one envelope, atomic commit, and a failing member neither cancels its siblings nor hides their outcomes |
 | `sleep` | Timer accuracy, replay after wake, `null` result |
-| `wait` | Match, timeout, expression binding, `since` windows |
+| `wait` | Match, timeout, `since` windows |
 | `early_signal` | Event sent **before** the wait is registered still resolves it; FIFO consumption; one entry consumed by one wait; sender dedupe (§7.6) |
 | `invoke` | Child run, result memoization, detach, depth and fan-out limits, cycle rejection |
 | `cascade` | Parent cancellation cancels non-detached descendants and leaves detached ones running (§7.5) |
@@ -956,8 +967,8 @@ its observable behaviour under this server matches the specification.
 Run of `order-fulfilment` keyed `order:4711`.
 
 1. `order.created` ingested → run created → **attempt 1**, `steps: {}`.
-   App replays: hits `charge` (no result) → executes → `{"ops":[{"op":"step","id":"charge","hash":"3f2a91c4","data":{"tx":"ch_1"}}]}`.
-2. **Attempt 2**, `steps: {3f2a91c4: …}`. App replays `charge` from memo, reaches `ctx.sleep("cooldown","P1D")` → `{"ops":[{"op":"sleep","id":"cooldown","hash":"a71bd0e2","duration":"P1D"}]}`. Run suspends.
+   App replays: hits `charge` (no result) → executes → `{"ops":[{"op":"step","id":"charge","hash":"3f2a91c4b70e1d55","data":{"tx":"ch_1"}}]}`.
+2. **Attempt 2**, `steps: {3f2a91c4b70e1d55: …}`. App replays `charge` from memo, reaches `ctx.sleep("cooldown", 1 day)` → `{"ops":[{"op":"sleep","id":"cooldown","hash":"a71bd0e2ff34c918","until":"2026-08-20T10:00:00Z"}]}`. Run suspends.
 3. 24 h later, **attempt 3**. App replays two steps, reaches `wait_event("approval")` → suspends again.
 4. Operator resolves the wait in the console → synthetic `order.approved` recorded → **attempt 4**. App replays three steps, executes `ship` → `step` op.
 5. **Attempt 5**: handler returns → `{"ops":[{"op":"done","data":{"shipped":true}}]}`. Run `completed`.
@@ -971,5 +982,5 @@ Run of `order-fulfilment` keyed `order:4711`.
 | `attempt-request.schema.json` | Server → app |
 | `attempt-response.schema.json` | App → server (op envelope) |
 | `op.schema.json` | All op variants |
-| `event.schema.json` | CloudEvents 1.0 + stepd extensions |
+| `event.schema.json` | CloudEvents 1.0 + `stepdkey` / `stepdidempotency` (§4.1) |
 | `problem.schema.json` | RFC 9457 error body |

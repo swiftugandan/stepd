@@ -15,7 +15,8 @@
     },
     "duration": {
       "type": "string",
-      "pattern": "^P(?!$)(\\d+Y)?(\\d+M)?(\\d+W)?(\\d+D)?(T(?=\\d)(\\d+H)?(\\d+M)?(\\d+(\\.\\d+)?S)?)?$"
+      "pattern": "^P(?!$)(\\d+W)?(\\d+D)?(T(?=\\d)(\\d+H)?(\\d+M)?(\\d+(\\.\\d+)?S)?)?$",
+      "description": "ISO 8601 duration over weeks, days, hours, minutes and seconds. Years and months are refused: a month is not a fixed number of seconds."
     },
     "stepHash": {
       "type": "string",
@@ -131,15 +132,9 @@
           "type": "string",
           "maxLength": 65536
         },
-        "retry_after": {
-          "$ref": "#/$defs/duration"
-        },
         "attempts": {
           "type": "integer",
           "minimum": 0
-        },
-        "data": {
-          "$ref": "#/$defs/payload"
         }
       }
     },
@@ -173,10 +168,6 @@
             },
             "content_type": {
               "type": "string"
-            },
-            "filename": {
-              "type": "string",
-              "maxLength": 256
             },
             "meta": {
               "type": "object",
