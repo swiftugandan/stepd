@@ -24,7 +24,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@stepd/protocol": "file:../../../../spec/typescript"
+    "@stepd/protocol": "link:../../../../spec/typescript"
   },
   "devDependencies": {
     "@types/node": "^22.13.1",

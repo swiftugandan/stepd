@@ -83,3 +83,15 @@ export class OccurrenceCounter {
 export function sha256Hex(text: string): string {
   return bytesToHex(sha256(utf8ToBytes(text)));
 }
+
+/**
+ * SHA-256 of raw bytes, hex.
+ *
+ * The digest a `$blob` reference carries (§8.3.1). The server verifies it before
+ * the blob becomes readable, and a client verifies it again on a full read —
+ * a truncated transfer is the one corruption the server cannot see, because it
+ * never held the bytes.
+ */
+export function sha256Bytes(data: Uint8Array): string {
+  return bytesToHex(sha256(data));
+}

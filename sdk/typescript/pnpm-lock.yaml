@@ -11,8 +11,8 @@ importers:
   apps/conformance:
     dependencies:
       '@stepd/protocol':
-        specifier: file:../../../../spec/typescript
-        version: file:../../spec/typescript
+        specifier: link:../../../../spec/typescript
+        version: link:../../../../spec/typescript
       '@stepd/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
@@ -30,8 +30,8 @@ importers:
   packages/sdk:
     dependencies:
       '@stepd/protocol':
-        specifier: file:../../../../spec/typescript
-        version: file:../../spec/typescript
+        specifier: link:../../../../spec/typescript
+        version: link:../../../../spec/typescript
       '@stepd/sdk-core':
         specifier: workspace:*
         version: link:../sdk-core
@@ -52,8 +52,8 @@ importers:
   packages/sdk-core:
     dependencies:
       '@stepd/protocol':
-        specifier: file:../../../../spec/typescript
-        version: file:../../spec/typescript
+        specifier: link:../../../../spec/typescript
+        version: link:../../../../spec/typescript
     devDependencies:
       '@types/node':
         specifier: ^22.13.1
@@ -402,10 +402,6 @@ packages:
     os: [linux]
     libc: [glibc]
 
-  '@noble/hashes@1.8.0':
-    resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
-    engines: {node: ^14.21.3 || >=16}
-
   '@rollup/rollup-android-arm-eabi@4.62.5':
     resolution: {integrity: sha512-jfkGfTwhQpsiSckPF8r9bU3pn3vyd72NlWaO+TgEO6WPSDnUhXzrNYCHBMOYj0ACaUgjm6eERLF+XV9a6RstoA==}
     cpu: [arm]
@@ -543,10 +539,6 @@ packages:
     resolution: {integrity: sha512-/gDJaRs4gl0NPIwqCz+6PkpmhhjRAD2j6P4rSNHBzUkO3naEx2mIU0pRle1vUNRQ7mE/+8OOeXLTv/J56FKiQg==}
     cpu: [x64]
     os: [win32]
-
-  '@stepd/protocol@file:../../spec/typescript':
-    resolution: {directory: ../../spec/typescript, type: directory}
-    engines: {node: '>=20'}
 
   '@types/chai@5.2.3':
     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
@@ -1126,8 +1118,6 @@ snapshots:
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
 
-  '@noble/hashes@1.8.0': {}
-
   '@rollup/rollup-android-arm-eabi@4.62.5':
     optional: true
 
@@ -1202,10 +1192,6 @@ snapshots:
 
   '@rollup/rollup-win32-x64-msvc@4.62.5':
     optional: true
-
-  '@stepd/protocol@file:../../spec/typescript':
-    dependencies:
-      '@noble/hashes': 1.8.0
 
   '@types/chai@5.2.3':
     dependencies:

@@ -172,16 +172,15 @@ export function createHandler(
     const attempt = decoded.attempt;
 
     // §8.6. Replaying against a partial journal re-executes every step the app
-    // could not see, the run still completes, and nothing errors — so an SDK
-    // that cannot page must refuse rather than proceed on what it holds.
+    // could not see, the run still completes, and nothing errors — so an app
+    // with nowhere to page from still refuses rather than proceeding on what it
+    // happens to hold.
     if (attempt.state_truncated) {
-      return problem({
-        kind: 'malformed',
-        why:
-          'the attempt journal was truncated and this SDK build cannot yet page it; ' +
-          'raise STEPD_ATTEMPT_STATE_LIMIT on the server or split the run with ' +
-          'continue_as_new (protocol §8.6)',
-      });
+      try {
+        attempt.steps = await app.journal.fetchRemaining(attempt.run.id, attempt.steps);
+      } catch (e) {
+        return problem({ kind: 'malformed', why: e instanceof Error ? e.message : String(e) });
+      }
     }
 
     const fn = app.handlerFor(attempt.run.function_id);

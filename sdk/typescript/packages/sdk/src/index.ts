@@ -6,6 +6,8 @@
  * re-exports: the split is by failure mode, so everything here fails visibly.
  */
 export { App, SDK_VERSION, type AppOptions } from './app.js';
+export { Blob, BlobError, Blobs, type PutOptions } from './blobs.js';
+export { JournalSource } from './journal.js';
 export {
   DEFAULT_RETRIES,
   DEFAULT_TIMEOUTS,

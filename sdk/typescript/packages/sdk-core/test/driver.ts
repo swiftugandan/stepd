@@ -106,12 +106,14 @@ export class Driver {
               data: event!.data as RecordedStep['data'],
             });
           } else if (this.timedOut.has(op.id)) {
-            // A timed-out wait is `completed` with no data, not `failed`:
-            // "nobody approved in seven days" is an outcome to branch on.
+            // `timed_out`, which is what the engine records — not `completed`
+            // with no data. The distinction matters: this test recorded the
+            // convenient shape rather than the real one and passed while
+            // `conf-wait-timeout` failed the whole battery.
             this.#record(op.hash, {
               id: op.id,
               op: 'wait_event',
-              status: 'completed',
+              status: 'timed_out',
               data: null,
             });
           }

@@ -8,11 +8,16 @@ packages/sdk/         the builders, the manifest, the request handler
 apps/conformance/     the §12.2 battery app — never published, never a production route
 ```
 
-**`stepd conformance` reports this app CONFORMANT AT LEVEL 1**, with all twelve
-declared cases passing. The twelve level-2 suites are not declared, so the runner
-reports them as unknowns that bar level 2 rather than as failures — the blob
-client, the §8.6 paging and the level-2 handlers are not written yet. The root
-[`README.md`](../../README.md) says what is finished and what is not.
+**`stepd conformance` reports this app CONFORMANT AT LEVEL 2** — all nineteen
+suites declared, 28 of 28 cases passing, including the two-phase blob upload and
+§8.6 journal paging. CI runs it on every push.
+
+What that adds is worth stating precisely: this SDK is a port of the Rust one,
+written by reading it, so the two can share a misreading of the specification the
+same way the battery and the Rust SDK can. It shows the §12.2 contract is
+implementable twice against one server — not that the spec is sufficient alone.
+That would need an implementation written from `spec/PROTOCOL.md` and nothing
+else ([#6](https://github.com/swiftugandan/stepd/issues/6)).
 
 The SDK's surface is `(Request) => Promise<Response>`, so the same handler runs
 under `node:http`, Bun, Deno, a Cloudflare Worker or a Next.js route. Framework
@@ -81,6 +86,32 @@ workflow never run. `allSettled` in particular is a reasonable thing to reach fo
 rather than a mistake anyone would flag in review — it was found by writing a
 test that expected it to work.
 
+## Large payloads and large journals
+
+`Blobs` is the §8.3.2 two-phase client: reserve, upload straight to the store,
+return a reference. Bytes never cross the stepd server. Upload **inside a step** —
+that is what records the reference in the journal, and the journal reference is
+what keeps the bytes alive.
+
+```ts
+const receipt = await ctx.step('receipt', async () => {
+  const blob = await blobs.put(ctx.run.id, pdf, { contentType: 'application/pdf' });
+  return blob.toJSON();
+});
+```
+
+Reading is lazy and a `Blob` is a value, so replaying a run with forty
+blob-bearing steps decodes forty references and downloads nothing. Full reads
+verify the digest — a truncated transfer is the one corruption the server cannot
+see, because it never held the bytes. Range reads do not, because a range does
+not hash to the object's digest.
+
+`App.journalSource(base, token)` supplies the address for §8.6 paging. Without
+it, an attempt carrying `state_truncated` fails non-retryably naming the method,
+which is the only safe alternative: replaying against a partial journal
+re-executes every step the app could not see, the run still completes, and
+nothing errors.
+
 ## Two deliberate differences from the Rust SDK
 
 **Step results are projected through JSON on first execution too.** Rust returns
@@ -97,7 +128,7 @@ attempt forty.
 No database, no server, no `STEPD_TEST_DATABASE_URL`:
 
 ```bash
-pnpm test        # 106 tests: 76 in sdk-core, 30 in sdk
+pnpm test        # 124 tests: 76 in sdk-core, 48 in sdk
 pnpm typecheck
 pnpm build       # ESM, CJS and .d.ts
 ```

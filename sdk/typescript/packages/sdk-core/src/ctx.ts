@@ -355,6 +355,29 @@ export class Ctx {
     }
   }
 
+  /**
+   * A wait's outcomes are not a step's, so it does not share `#replay`.
+   *
+   * A timeout is an outcome, not an error: "nobody approved in seven days" is
+   * something the handler branches on, and the protocol records it as a `null`
+   * result rather than a failure. Reusing the step path here made
+   * `conf-wait-timeout` fail the run instead of resolving — caught by the
+   * conformance battery, and by nothing else.
+   */
+  #replayWait<T>(id: string, recorded: RecordedStep): T | null {
+    if (recorded.status === 'timed_out') return null;
+    if (recorded.status === 'pending' || recorded.status === 'unknown') {
+      // The engine never ships pending rows, so seeing one means a store or a
+      // harness did. Treating it as "resolved with no data" would silently skip
+      // the wait, which is the failure the whole inbox mechanism exists to stop.
+      throw Halt.yield_(`wait '${id}' is unresolved; the server will retry`);
+    }
+    if (recorded.status === 'failed' || recorded.status === 'cancelled') {
+      return this.#replay<T>(id, recorded);
+    }
+    return (recorded.data ?? null) as T | null;
+  }
+
   /** Suspend for a duration. Consumes no app compute while parked. */
   sleep(id: string, ms: number): StepFuture<null> {
     return this.sleepUntil(id, new Date(this.clock().getTime() + ms));
@@ -388,12 +411,7 @@ export class Ctx {
         : new Date(this.clock().getTime() + options.timeoutMs).toISOString();
 
     return new StepFuture<T | null>(id, async () => {
-      if (recorded !== undefined) {
-        // A wait that timed out is recorded completed with no data, not failed:
-        // "nobody approved in seven days" is an outcome the handler branches on.
-        const value = this.#replay<T | null>(id, recorded);
-        return value ?? null;
-      }
+      if (recorded !== undefined) return this.#replayWait<T>(id, recorded);
       this.pushOp({
         op: 'wait_event',
         id,

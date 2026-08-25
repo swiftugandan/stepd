@@ -1,5 +1,6 @@
 import { sha256Hex, type Json } from '@stepd/protocol';
 import type { Function } from './function.js';
+import { JournalSource } from './journal.js';
 
 /** This SDK's identifier, sent as `stepd-sdk` and in the manifest (§3). */
 export const SDK_VERSION = 'typescript/0.1.0';
@@ -24,11 +25,34 @@ export class App {
   readonly devMode: boolean;
   readonly #keys: Array<Uint8Array | string> = [];
   readonly #functions = new Map<string, Function>();
+  /**
+   * Where a truncated journal is paged from (§8.6).
+   *
+   * A handle rather than a value, because the address is often not known when
+   * the app is built: a conformance app is told it after it is already serving
+   * (§12.1), and a deployment reading it from the environment can set it at
+   * construction. Both go through `configure`.
+   */
+  readonly journal = new JournalSource();
 
   constructor(options: AppOptions) {
     this.appId = options.appId;
     this.url = options.url;
     this.devMode = options.devMode ?? false;
+  }
+
+  /**
+   * Where to page a journal too large to ship inline (§8.6).
+   *
+   * The token needs the operator role. Without this an attempt carrying
+   * `state_truncated` fails non-retryably naming this method — which is correct,
+   * because the alternative is replaying against a partial journal and silently
+   * re-executing every step the app could not see. Only runs that reach the
+   * server's inline ceiling are affected.
+   */
+  journalSource(baseUrl: string, token: string): this {
+    this.journal.configure(baseUrl, token);
+    return this;
   }
 
   /** Add a signing key. Call twice during rotation: both verify, the first signs. */

@@ -55,7 +55,7 @@ engine crates ([ADR-024](docs/adr/024-language-trees.md)).
 | `stepd-proto` | Complete | 36 tests, plus the cross-language fixtures |
 | `@stepd/protocol` | Complete | 103 tests; agrees with `stepd-proto` on 20 committed vectors |
 | `@stepd/sdk-core` | Complete | 76 tests — the replay machinery |
-| `@stepd/sdk` | Level 1 | 30 tests; `stepd conformance` reports the TypeScript app **level 1**, 12/12 declared cases. The twelve level-2 suites are undeclared, not failing |
+| `@stepd/sdk` | Complete | 48 tests; the TypeScript app reaches **level 2**, 28/28 cases |
 | `stepd-core` | Complete | 72 tests, in-memory fakes for every interface |
 | `stepd-store-postgres` | Complete | 16 unit + 25 live + the simulation harness |
 | `stepd-expr-cel` | Complete (documented subset) | 16 tests |
@@ -69,7 +69,7 @@ engine crates ([ADR-024](docs/adr/024-language-trees.md)).
 | Cancellation compensation | Complete | migration 010; conformance `cancel` |
 | Managed blobs | Complete — filesystem (relay) and S3 (presigned) | two-phase upload, `Range`, dedupe, reference tracking; the S3 suites need `STEPD_TEST_S3_*` and no CI lane sets it ([#25](https://github.com/swiftugandan/stepd/issues/25)) |
 | Subject erasure | **Schema only** | [#1](https://github.com/swiftugandan/stepd/issues/1) |
-| Conformance suite | Complete | 19 suites, 28 cases; the reference app reaches **level 2** |
+| Conformance suite | Complete | 19 suites, 28 cases; the Rust reference app and the TypeScript app both reach **level 2** |
 
 **A five-step workflow runs from an ingested event to a completed run**, through
 the real dispatcher, a real SDK app on a real socket, over signed HTTP, against
@@ -171,6 +171,30 @@ the Rust SDK were written together, so they can agree on a shared misreading of
 the specification. What it establishes is that every assertion is reachable, that
 the §12.2 contract is implementable, and that an SDK change breaking a protocol
 guarantee fails a build.
+
+A second app now passes the same battery, in TypeScript:
+
+```bash
+cargo run -p stepd-cli -- conformance \
+  --app http://127.0.0.1:9944 \
+  --app-configure-url http://127.0.0.1:9944/_conformance/configure
+```
+
+**28/28 cases, level 2** — and CI runs it on every push, so the claim keeps being
+produced rather than remembered. Be precise about what it adds, though: that SDK
+is a deliberate port of the Rust one, written by reading it. Two implementations
+sharing an author can share a misreading exactly the way the battery and the Rust
+SDK can. It shows the §12.2 contract is implementable twice, in two languages,
+against one server — not that the specification is sufficient on its own. The
+evidence for *that* is an implementation written from `spec/PROTOCOL.md` alone,
+and it does not exist ([#6](https://github.com/swiftugandan/stepd/issues/6)).
+
+What it did surface is concrete: a defect none of that SDK's 76 unit tests found.
+A `wait_event` that timed out was replayed as an error rather than the `null` a
+handler branches on, so "nobody approved in seven days" failed the run instead of
+taking the other branch. The unit test that should have caught it recorded the
+convenient status rather than the one the engine actually writes — which is the
+argument for a battery driven by a real server in the first place.
 
 Without `STEPD_TEST_DATABASE_URL` the database-backed tests **skip loudly**. A
 database test that silently passes when it did not run is worse than no test,

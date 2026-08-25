@@ -96,6 +96,11 @@ export function serve(app: App, state: AppState, port: number): ReturnType<typeo
           return;
         }
         state.configure(body.api_base, body.token);
+        // The SDK pages a truncated journal itself (§8.6), before the pass runs,
+        // so the address has to reach the `App` and not only this app's own
+        // state. Configuring one and not the other is how `truncation` and
+        // `blobs` end up disagreeing about whether the app was set up.
+        app.journalSource(body.api_base, body.token);
         json(res, 200, { configured: true });
         return;
       }
