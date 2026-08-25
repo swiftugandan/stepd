@@ -1,8 +1,8 @@
 # stepd — durable workflow engine
 
 **Last verified 2026-08-23** against PostgreSQL 16. Read this before running
-anything: it states what is finished, what is not, and where the trustworthy
-artifacts are.
+anything: it states what is finished and where the trustworthy artifacts are.
+What is *not* finished is in the [`gap`-labelled issues][gaps].
 
 ---
 
@@ -44,235 +44,37 @@ reference/   Python reference implementation — kept as an independent model
 | `stepd-cli` | Complete | `serve` · `migrate` · `doctor` · `dev` · `token` · `run` · `limits` · `conformance` |
 | Cron scheduler | Complete | 37 unit + 47 SQL + 13 live + 3 e2e; simulation property P10 |
 | Cancellation compensation | Complete | migration 010; conformance `cancel` |
-| Managed blobs | Complete — filesystem (relay) and S3 (presigned) | two-phase upload, `Range`, dedupe, reference tracking; the S3 suites need `STEPD_TEST_S3_*` and nothing automatic sets it |
-| Subject erasure | **Schema only** | see below |
+| Managed blobs | Complete — filesystem (relay) and S3 (presigned) | two-phase upload, `Range`, dedupe, reference tracking; the S3 suites need `STEPD_TEST_S3_*` and no CI lane sets it ([#25](https://github.com/swiftugandan/stepd/issues/25)) |
+| Subject erasure | **Schema only** | [#1](https://github.com/swiftugandan/stepd/issues/1) |
 | Conformance suite | Complete | 19 suites, 28 cases; the reference app reaches **level 2** |
 
 **A five-step workflow runs from an ingested event to a completed run**, through
 the real dispatcher, a real SDK app on a real socket, over signed HTTP, against
 PostgreSQL 16 — `rust/crates/stepd-server/tests/end_to_end.rs`.
 
-## Honest gaps
+## Known gaps
 
-Listed here rather than buried, because the previous version of this table
-overstated the opposite way and that is how four defects sat undetected.
+Every gap between what this claims and what it implements is an open issue,
+labelled [`gap`][gaps] and carrying the register's severity — **S1** silent
+corruption, **S2** outage or data loss, **S3** operational pain, **S4** adoption
+drag. That tracker is the live list. `docs/GAPS.md` records the same material
+with its resolutions, but it is a snapshot and loses where the two disagree.
 
-* **Subject erasure is schema only.** `subject_index` and `erasures` exist; no
-  code reads `subject_key`. `docs/adr/020-subject-erasure.md` is `Proposed`.
-* **Circuit-breaker state is not in the API.** Breakers are per-replica and in
-  memory. `/v1/functions` reports observable failure counts rather than a value
-  that would be confidently wrong.
-* **BR-19 on the S3 path is proved by tests nothing runs automatically.**
-  `STEPD_BLOB_BACKEND=s3` presigns the upload with `x-amz-checksum-sha256` and
-  `content-length` bound into the SigV4 signature, so the object store rejects
-  mismatched bytes itself and the server issues only `HeadObject` and
-  `DeleteObject` against it — it never transfers an object.
-  `no_object_bytes_reach_the_server_on_the_s3_path`
-  (`stepd-server/tests/end_to_end.rs`) drives a real run whose step result
-  carries a 256 KiB `$blob` and asserts that everything crossing the server's
-  own socket, both directions, stayed under 32 KiB; `stepd-blobs-s3/tests/live.rs`
-  checks the store's enforcement directly. Both skip loudly without
-  `STEPD_TEST_S3_*`, and no lane in `.github/workflows/ci.yml` sets it —
-  `grep -c STEPD_TEST_S3 .github/workflows/ci.yml` is 0. (The end-to-end one
-  also needs `STEPD_TEST_DATABASE_URL`, which CI *does* set at `ci.yml:108`, so
-  `tier 2 · integration` compiles and runs that test on pushes to `main` and on
-  pull requests — `ci.yml:20-25` is the whole trigger, so a push to a branch with
-  no PR open runs nothing — and it skips there, for want of the S3 variables.) So this is evidence that exists and
-  passes locally, and no evidence that is produced automatically.
-  `docs/blob-backends.md` records what
-  MinIO `RELEASE.2025-09-07T16-13-09Z` and RustFS `v1.0.0-beta.12` actually did
-  when probed — both reject a presigned PUT whose body does not match its signed
-  checksum, but RustFS is a beta release and reports that rejection under the
-  wrong header name (`Content-Md5`), so its error text is not a basis for any
-  claim about which header it checked.
-* **One narrow regression in the S3 backend would escape every test.** If
-  `S3Backend::stored` kept its `HeadObject` and kept refusing an object the
-  store reports no checksum for, and merely *added* a `GetObject` beside them,
-  nothing would go red — and the payload would be crossing the wire between the
-  server and the object store again.
-  `a_committed_object_reports_its_digest_without_transferring_it` measures the
-  answer and not the transfer, and says so in its own comment; and
-  `no_object_bytes_reach_the_server_on_the_s3_path` counts bytes on the server's
-  client-facing socket, which server-to-store traffic never crosses. The
-  neighbouring regressions *are* caught. Replacing the `HeadObject` with a
-  GET-and-hash fails
-  `an_object_the_store_reports_no_checksum_for_is_an_error_not_a_fallback`,
-  because that test's object has no checksum and the replacement would answer
-  for it instead of erroring. And `stored` returning `None` — which would route
-  `commit_blob` into its read-and-hash arm — fails the same test, and on a real
-  deployment fails the commit loudly anyway, because
-  `PostgresBlobStore::get_bytes` errors on a store built with `relay: None` and
-  that is how `Server::build` builds the S3 one. So: one specific shape, not a
-  class, recorded because it is the one change that could put payload bytes back
-  onto the control plane without a red build.
-* **A `$blob` that arrives outside an attempt envelope is still never
-  verified.** §8.3.2 requires the server to check `size` and `sha256` before a
-  blob becomes readable. `Dispatcher::verify_blobs` does that for an envelope's
-  ops — which is where the `invoke` and `continue_as_new` run inputs live — and
-  its emitted events. A `$blob` in an event ingested through `POST /v1/events`,
-  which is what becomes a run's input, or in a signal payload sent to
-  `POST /v1/runs/{id}/resolve-wait`, reaches no `commit_blob` call anywhere:
-  neither `api.rs` nor `ingest.rs` mentions blobs at all, and `commit_blob` has
-  exactly two callers on the serving path — the dispatcher and the relay
-  endpoint. On a presigning backend such a row therefore stays `reserved`, and
-  the collector takes its bytes once the reservation window
-  (`STEPD_BLOB_RESERVATION_TTL_HOURS`, default 24) passes. §8.3.4, the
-  *reference* obligation, is a separate matter and is covered on every path —
-  `runs_record_blob_refs` in `migrations/0011_blob_refs.sql` fires on
-  `INSERT OR UPDATE OF input, output ON runs`, so an ingested event's blob does
-  get its `blob_refs` row. It is verification, not reference counting, that has
-  one entry point. Since `load_attempt` began minting read URLs for
-  `RunContext.input` and the trigger events as well as the journal, an app can
-  also *read* such a blob, where before it received a reference with no `url`
-  and could not. That read is not the unverified step: `stepd-sdk`'s
-  `Blobs::read` hashes a full read and compares it against the reference's
-  declared `sha256` by default (`verify_on_read` defaults to `true`). What
-  stays unverified is the row — nothing ever compared the object to the digest
-  the app declared, so `read`'s check only confirms the bytes match a `sha256`
-  that was itself never checked, and a ranged read (`Blobs::read_range`)
-  cannot make even that check, because a byte range does not hash to the whole
-  object's digest. That does not widen the verification gap, but it does make it reachable;
-  the remedy is verification at ingest, not withholding a URL from every
-  reference including the ones the dispatcher did verify.
-* **`commit_blob` does no namespace check**, and neither does `attach_read_urls`
-  or `presign_read` — all three look a blob up by id alone. Pre-existing, but
-  op-commit is the first place an app-supplied blob id drives a
-  `reserved → committed` transition on a row the app may not own. The reachable
-  consequence is a **read of another namespace's payload**, not just a state
-  change on its row: an app puts `{"$blob": {"id": <foreign uuid>, "size": N}}`
-  in its own step result; `verify_blobs` finds the row already `committed` and
-  short-circuits `Ok`; `record_step_blob_refs` inserts a reference, checking
-  only that the blob exists; and the next attempt mints a read URL for it —
-  which on the S3 backend is a presigned `GET` straight to the object store,
-  since every namespace shares one bucket. Guessing an id is impractical
-  (UUIDv7 leaves 74 random bits), but ids are not secrets: they appear in logs,
-  in the console, and in any app that handled the blob legitimately.
-  Substituting *content* is a separate matter and remains impossible: the
-  digest is fixed at reservation and is what the commit checks against.
-* **The SDK does not enforce the compensation path.** A handler that declares
-  `on_cancel` and ignores `ctx.run().cancelling` will re-run its normal work.
-  The protocol says the SDK runs only the compensation path; the Rust SDK exposes
-  the flag and trusts the handler.
+They live there rather than in a section here because a list in a README is
+updated when someone remembers to. The version of the status table above that
+this replaced overstated in the opposite direction, and that is how four defects
+sat undetected.
 
-`docs/RECONCILIATION.md` has the full list, and the seventeen defects found and
-fixed — nine in the tree that shipped in this archive, three while building the
-cron scheduler, three the conformance suite found on its first run, one more
-found by asking what kept a blob's bytes alive, and one found by deleting a
-feature and having to write down what was left.
+[`docs/RECONCILIATION.md`](docs/RECONCILIATION.md) is the other half of the
+record: the seventeen defects found and fixed, and §7, the findings worth
+carrying forward from them.
 
-## The findings worth carrying forward
+Two CI lanes are red as of 2026-08-25, so two of the evidence claims above are
+not currently being produced automatically: `tier 3 · through pgbouncer`
+([#28](https://github.com/swiftugandan/stepd/issues/28)) and `tier 4 · soak`
+([#27](https://github.com/swiftugandan/stepd/issues/27)).
 
-Every one came from a test failing, or from reading code against the design it
-claimed to implement — none from review in the abstract.
-
-1. **Correctness can rest on undocumented accidents.** The lost-signal race was
-   originally closed only by a foreign key's incidental row lock. Fixed by making
-   the serialization explicit, with a structural test that fails the build if it
-   moves.
-
-2. **A countermeasure can point at the wrong thing.** Those structural tests
-   asserted properties of the SQL functions — and the Rust store had grown its
-   own four hundred lines of application SQL that reimplemented the commit and
-   called none of them. Two correctness centres; the tests guarded one; the other
-   was the one that ran. Three live defects were sitting in it.
-
-3. **`continue_as_new` orphaned live children.** Found by the simulation harness
-   via property P8 on its first run. The cascade rules covered cancellation and
-   failure but not continuation.
-
-4. **Eager hash claiming makes concurrency safe by construction.** `ctx.step()`
-   must claim the occurrence when *called*, not when its future is *polled*.
-   Claiming at poll time ties the hash to scheduler order, so `join!` silently
-   re-executes completed work.
-
-5. **…and a rule obeyed in one place is not obeyed.** `ctx.step` claimed eagerly;
-   `wait_event` and `invoke` claimed at `.await`. The project's own headline
-   hazard, reintroduced through a side door, found by reading the code against
-   its design document while writing ADR-012.
-
-6. **A flaky test was a design defect.** The circuit breaker's probabilistic
-   recovery ramp made recovery time impossible for operators to reason about and
-   for tests to pin down. Replaced with a deterministic token budget.
-
-7. **A breaker that closes only on observed successes never closes.** Once
-   traffic stops it stays half-open, throttling the next burst long after the app
-   recovered. Closure is now successes *or* a quiet period.
-
-8. **Passing is not exercising.** `reference/coverage_check.py` showed cascade
-   cancellation hit zero times across 500 green seeds — the suite had never
-   tested a fix that had just been made.
-
-9. **Documentation that overstates is a defect.** The transport's module comment
-   claimed resolve-then-connect DNS pinning that the code did not perform. A
-   comment describing a security property the code lacks is worse than no
-   comment: it stops the next reader from checking.
-
-10. **Plumbing a feature end to end is not implementing it.** Cancellation
-    compensation had a field on the wire type, an accessor in the SDK, a computed
-    value in the store and a comment citing the specification — and `cancel_run`
-    deleted the queue row, so the run was never dispatched again and the flag
-    could never be true. The undo silently did not happen and the run looked
-    exactly as it does when it worked. Three times now the missing piece has been
-    one line in the one place that would make the thing run, and every time
-    everything around it read as finished.
-
-11. **Ask what keeps a thing alive, not just what creates it.** `blob_refs`,
-    `add_ref` and `blob_ids` were all written, tested and never called — so the
-    collector was entitled to delete the bytes behind every `$blob` in a live
-    run's journal from the moment they were committed. The run would fail on its
-    next replay with a missing object, hours after the collection that caused it,
-    with nothing connecting the two. The reference is now recorded by a trigger
-    in the same transaction as the row that carries it, because any gap at all is
-    a window where a crash makes live data look like garbage.
-
-12. **A settled design document is not a specification.** ADR-016 answered every
-    question anyone had thought to ask about cron and was still underspecified in
-    three places, each found by a test rather than by rereading it: it said
-    `key_expr` where a cron fire has no event to evaluate one against; it said
-    nothing about fairness, and a namespace-blind claim ordered by `next_fire_at`
-    lets one tenant's backlog silently stop everyone else's schedules; and it did
-    not say what to do with a schedule that cannot be planned, where "log it and
-    carry on" is a hot loop because the row stays due forever.
-
-13. **The same defect arrives twice by the same route.** The cron sweep's
-    starvation bug is the dispatcher's, and it was found the same way — two tests
-    interfering in a shared database. `tick_namespace` exists because of the
-    first one. Nothing generalised the lesson into a rule, so the second
-    component made the same choice from scratch. Structural invariant 19 now
-    asserts it for cron, next to invariant 15 which asserts it for dispatch.
-
-14. **A truncated timestamp is a lost distinction.** The run input rendered its
-    cron occurrence to whole seconds, so two occurrences inside one second became
-    indistinguishable to the handler — and a point-in-time restore produces
-    exactly that, because it rewinds `next_fire_at` to an arbitrary instant. The
-    simulation harness found it on its first run with property P10, reporting two
-    runs for one occurrence that were in fact two occurrences it could no longer
-    tell apart.
-
-15. **A conformance suite has to specify what it observes.** Protocol §12 listed
-    nineteen suites and never said what an implementation must expose, so the
-    claim "a third party can implement this" had nothing behind it. Worse, the
-    headline guarantee is untestable from server state: the journal after one
-    execution of a step body and after two is byte-identical, so the app itself
-    has to report what it ran.
-
-16. **A tool that certifies must be able to say what it did not check.** The
-    failure specific to a conformance runner is reporting LEVEL 2 when four of
-    its suites were never written — a result indistinguishable from a real pass.
-    So "not implemented by this runner" is a first-class outcome here, printed as
-    loudly as a failure, and it bars the level it belongs to. The runner's own
-    gaps are also evaluated *before* the app's declarations, because otherwise a
-    suite nobody declares is a hole that only shows up as somebody else's.
-
-17. **A comment can defend a hazard that the next layer reopens.** `join.rs`
-    polls every member of a parallel group to completion before deciding its
-    outcome, and says why in five lines: returning early would leave siblings
-    that had already executed unrecorded. The layer above discarded them anyway
-    — `PassOutcome::Error` carried no ops, so a group where one member raised
-    committed nothing at all. Two step bodies had run and returned and the
-    journal knew about neither. Deleting the join policies is what surfaced it:
-    the sentence that replaced them ends "every outcome is recorded", and
-    writing that down meant checking whether anything did.
+[gaps]: https://github.com/swiftugandan/stepd/issues?q=is%3Aissue+is%3Aopen+label%3Agap
 
 ## Running it
 
@@ -323,7 +125,8 @@ the verdict can be trusted without reading its source.
 
 `stepd conformance` tests an **app**. Turning it round to test a second server
 implementation would need the mirror battery — a fixed app that reports what it
-was sent — which is specified nowhere and does not exist (protocol §12.4).
+was sent — which is specified nowhere and does not exist (protocol §12.4,
+[#10](https://github.com/swiftugandan/stepd/issues/10)).
 
 The battery also runs against the bundled reference app in CI:
 
@@ -512,34 +315,10 @@ and skipped counts, and — if the sweep gave up on a schedule — why.
 | `docs/adr/` | Twenty-three ADRs. Start with 011, 012 and 019 — the silent-corruption ones. ADR-016 records what building cron taught about ADR-016; 021 and 022 what the conformance suite found. |
 | `docs/runbooks/restore-hazard.md` | **Read before you need it.** A point-in-time restore re-executes side effects — and re-fires cron occurrences, which is section 3a. |
 | `docs/runbooks/` | Stuck runs, backlog, poison pills, upgrades. |
-| `docs/RECONCILIATION.md` | What was wrong with the archived tree, and what was done. |
-| `docs/GAPS.md` | The gap register. |
+| `docs/RECONCILIATION.md` | What was wrong with the archived tree, what was done, and §7 — the findings worth carrying forward. |
+| `docs/GAPS.md` | The gap register, with a resolution against each gap. A snapshot; the [issue tracker](https://github.com/swiftugandan/stepd/issues) is the live list. |
 | `docs/blob-backends.md` | Which S3-compatible servers were observed to enforce a signed upload checksum, and what each one's rejection actually looked like. Read before choosing a store for `STEPD_BLOB_BACKEND=s3`. |
 | `docs/SDK-DESIGN-rust.md` | The two mechanisms that carry all the SDK's risk. |
-
-## Next steps, in order
-
-1. **Implement subject erasure**, and resolve its tension with the append-only
-   journal and with backups — stated in ADR-020, not yet decided.
-2. **Persist circuit-breaker state**, so an operator can see it during an
-   incident.
-3. **Get a second SDK written against the spec alone.** The conformance battery
-   exists now, and passing it against the reference app is weak evidence: the
-   suite and the Rust SDK were written together and can share a misreading. An
-   independent implementation reaching level 2 is the claim the protocol is
-   actually making.
-4. **Get the CI lanes green, and add one for the S3 backend.**
-   `.github/workflows/ci.yml` runs on pushes to `main`, on pull requests and
-   nightly (`ci.yml:20-25`); as of run `32688345824` four
-   of six lanes pass and two do not — `tier 3 · through pgbouncer (F-DL-1)`,
-   which is the lane that turns "we only use row-level locks" from an assertion
-   into evidence, and `tier 4 · soak (nightly)`. Nothing sets `STEPD_TEST_S3_*`
-   in any lane, so the managed-blob claim in *Honest gaps* above has no
-   automatic evidence behind it either.
-5. **Rehearse the restore runbook.** It is the document most likely to matter, a
-   procedure nobody has practised takes hours and produces its decisions under
-   pressure — and it just grew a cron section that has never been walked
-   through.
 
 ## Licence
 

@@ -15,7 +15,7 @@ useful than the fact that something was.
 
 ## 1. The finding behind most of the others
 
-The README's first "finding worth carrying forward" reads:
+Finding 1 in §7 reads:
 
 > **Correctness can rest on undocumented accidents.** Structural invariant tests
 > are the countermeasure — they fail the build if the explicit lock is removed
@@ -475,3 +475,122 @@ evidence of what was true when it was taken.
 The database-backed tests **skip loudly** without `STEPD_TEST_DATABASE_URL`. A
 database test that silently passes when it did not run is worse than no test,
 because the green tick is then a lie about the thing most likely to break.
+
+---
+
+## 7. Findings worth carrying forward
+
+These are the lessons, where §2 is the defects. Every one came from a test
+failing, or from reading code against the design it claimed to implement —
+none from review in the abstract. They lived in the README until the gap list
+moved to the issue tracker; they are history rather than open work, so they
+belong here.
+
+1. **Correctness can rest on undocumented accidents.** The lost-signal race was
+   originally closed only by a foreign key's incidental row lock. Fixed by making
+   the serialization explicit, with a structural test that fails the build if it
+   moves.
+
+2. **A countermeasure can point at the wrong thing.** Those structural tests
+   asserted properties of the SQL functions — and the Rust store had grown its
+   own four hundred lines of application SQL that reimplemented the commit and
+   called none of them. Two correctness centres; the tests guarded one; the other
+   was the one that ran. Three live defects were sitting in it.
+
+3. **`continue_as_new` orphaned live children.** Found by the simulation harness
+   via property P8 on its first run. The cascade rules covered cancellation and
+   failure but not continuation.
+
+4. **Eager hash claiming makes concurrency safe by construction.** `ctx.step()`
+   must claim the occurrence when *called*, not when its future is *polled*.
+   Claiming at poll time ties the hash to scheduler order, so `join!` silently
+   re-executes completed work.
+
+5. **…and a rule obeyed in one place is not obeyed.** `ctx.step` claimed eagerly;
+   `wait_event` and `invoke` claimed at `.await`. The project's own headline
+   hazard, reintroduced through a side door, found by reading the code against
+   its design document while writing ADR-012.
+
+6. **A flaky test was a design defect.** The circuit breaker's probabilistic
+   recovery ramp made recovery time impossible for operators to reason about and
+   for tests to pin down. Replaced with a deterministic token budget.
+
+7. **A breaker that closes only on observed successes never closes.** Once
+   traffic stops it stays half-open, throttling the next burst long after the app
+   recovered. Closure is now successes *or* a quiet period.
+
+8. **Passing is not exercising.** `reference/coverage_check.py` showed cascade
+   cancellation hit zero times across 500 green seeds — the suite had never
+   tested a fix that had just been made.
+
+9. **Documentation that overstates is a defect.** The transport's module comment
+   claimed resolve-then-connect DNS pinning that the code did not perform. A
+   comment describing a security property the code lacks is worse than no
+   comment: it stops the next reader from checking.
+
+10. **Plumbing a feature end to end is not implementing it.** Cancellation
+    compensation had a field on the wire type, an accessor in the SDK, a computed
+    value in the store and a comment citing the specification — and `cancel_run`
+    deleted the queue row, so the run was never dispatched again and the flag
+    could never be true. The undo silently did not happen and the run looked
+    exactly as it does when it worked. Three times now the missing piece has been
+    one line in the one place that would make the thing run, and every time
+    everything around it read as finished.
+
+11. **Ask what keeps a thing alive, not just what creates it.** `blob_refs`,
+    `add_ref` and `blob_ids` were all written, tested and never called — so the
+    collector was entitled to delete the bytes behind every `$blob` in a live
+    run's journal from the moment they were committed. The run would fail on its
+    next replay with a missing object, hours after the collection that caused it,
+    with nothing connecting the two. The reference is now recorded by a trigger
+    in the same transaction as the row that carries it, because any gap at all is
+    a window where a crash makes live data look like garbage.
+
+12. **A settled design document is not a specification.** ADR-016 answered every
+    question anyone had thought to ask about cron and was still underspecified in
+    three places, each found by a test rather than by rereading it: it said
+    `key_expr` where a cron fire has no event to evaluate one against; it said
+    nothing about fairness, and a namespace-blind claim ordered by `next_fire_at`
+    lets one tenant's backlog silently stop everyone else's schedules; and it did
+    not say what to do with a schedule that cannot be planned, where "log it and
+    carry on" is a hot loop because the row stays due forever.
+
+13. **The same defect arrives twice by the same route.** The cron sweep's
+    starvation bug is the dispatcher's, and it was found the same way — two tests
+    interfering in a shared database. `tick_namespace` exists because of the
+    first one. Nothing generalised the lesson into a rule, so the second
+    component made the same choice from scratch. Structural invariant 19 now
+    asserts it for cron, next to invariant 15 which asserts it for dispatch.
+
+14. **A truncated timestamp is a lost distinction.** The run input rendered its
+    cron occurrence to whole seconds, so two occurrences inside one second became
+    indistinguishable to the handler — and a point-in-time restore produces
+    exactly that, because it rewinds `next_fire_at` to an arbitrary instant. The
+    simulation harness found it on its first run with property P10, reporting two
+    runs for one occurrence that were in fact two occurrences it could no longer
+    tell apart.
+
+15. **A conformance suite has to specify what it observes.** Protocol §12 listed
+    nineteen suites and never said what an implementation must expose, so the
+    claim "a third party can implement this" had nothing behind it. Worse, the
+    headline guarantee is untestable from server state: the journal after one
+    execution of a step body and after two is byte-identical, so the app itself
+    has to report what it ran.
+
+16. **A tool that certifies must be able to say what it did not check.** The
+    failure specific to a conformance runner is reporting LEVEL 2 when four of
+    its suites were never written — a result indistinguishable from a real pass.
+    So "not implemented by this runner" is a first-class outcome here, printed as
+    loudly as a failure, and it bars the level it belongs to. The runner's own
+    gaps are also evaluated *before* the app's declarations, because otherwise a
+    suite nobody declares is a hole that only shows up as somebody else's.
+
+17. **A comment can defend a hazard that the next layer reopens.** `join.rs`
+    polls every member of a parallel group to completion before deciding its
+    outcome, and says why in five lines: returning early would leave siblings
+    that had already executed unrecorded. The layer above discarded them anyway
+    — `PassOutcome::Error` carried no ops, so a group where one member raised
+    committed nothing at all. Two step bodies had run and returned and the
+    journal knew about neither. Deleting the join policies is what surfaced it:
+    the sentence that replaced them ends "every outcome is recorded", and
+    writing that down meant checking whether anything did.
