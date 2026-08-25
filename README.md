@@ -132,8 +132,17 @@ cd ../reference && python3 simulation.py 5000 && python3 coverage_check.py 400
 # Against your own SDK, once it serves the §12.1 endpoints:
 cargo run -p stepd-cli -- conformance \
   --app http://127.0.0.1:9944 \
+  --app-configure-url http://127.0.0.1:9944/_conformance/configure \
   --database-url postgres://postgres@127.0.0.1:5433/stepd_conf
 ```
+
+`--app-configure-url` is what the `blobs` and `truncation` suites need. Both
+require the app to call back into the server, and neither the server's address
+nor a token exists until after the app is already running — the runner binds an
+ephemeral port and mints the token itself. So it posts them to that URL once it
+is serving. Leave the flag off and those two suites are unreachable, which is
+what they were for every app this runner did not start in-process — that is to
+say, every app not written in Rust.
 
 The report says what it checked **and what it did not**. A suite the app did not
 declare and a suite this runner has not implemented are different lines, and

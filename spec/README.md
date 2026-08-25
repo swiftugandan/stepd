@@ -74,4 +74,11 @@ Implementers should read those two sections before anything else.
    concurrent tasks claim occurrence counters.
 9. Never drop a running step future to meet a deadline; abandon the response instead (§7.1.1).
 10. Nonce per request, and a replay cache over the signature window (§9).
-11. Pass `stepd conformance --app <url>` at level 1, then level 2.
+11. Conformance mode (§12.1), as a separate binary or an explicit opt-in flag —
+    never a default route: `/.well-known/stepd-conformance`,
+    `/_conformance/effects`, `/_conformance/reset`, and — if you declare `blobs`
+    or `truncation` — `/_conformance/configure`, which is the only way your app
+    learns the server's address and a token.
+12. Pass `stepd conformance --app <url>` at level 1, then level 2. Add
+    `--app-configure-url <url>` for the endpoint in 11; without it, do not
+    declare `blobs` or `truncation`.

@@ -38,6 +38,8 @@ pub use report::{CaseResult, Report, Status, ALL_SUITES, LEVEL_1};
 
 /// Run the battery and return what it concluded.
 pub async fn run(options: Options) -> anyhow::Result<Report> {
+    use anyhow::Context as _;
+
     let harness = Harness::start(options).await?;
     // The `blobs` suite needs the app to be able to call back, which needs an
     // address and a token that do not exist until the harness is up. Every app
@@ -45,7 +47,11 @@ pub async fn run(options: Options) -> anyhow::Result<Report> {
     // which the test starts. The runner signals readiness and holds no opinion
     // about which app is listening.
     if let Some(on_ready) = harness.options.on_ready.clone() {
-        on_ready.call(&harness.api_base(), &harness.mint("operator").await?);
+        let token = harness.mint("operator").await?;
+        on_ready
+            .call(&harness.api_base(), &token)
+            .await
+            .context("the app under test did not accept its configuration")?;
     }
     let mut report = Report {
         declared: harness.manifest.suites.clone(),

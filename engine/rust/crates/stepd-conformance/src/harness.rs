@@ -19,6 +19,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use stepd_core::traits::{EventLog, StateStore};
@@ -40,6 +42,13 @@ pub struct Options {
     pub case_timeout: Duration,
     /// Run only these suites, if non-empty.
     pub only: Vec<String>,
+    /// Address the runner's own API binds to.
+    ///
+    /// Ephemeral by default, which is right when the app under test is told the
+    /// address afterwards through [`Options::on_ready`]. An app that has to be
+    /// configured *before* it starts — a container with the URL already in its
+    /// environment — needs a fixed one instead.
+    pub api_bind: String,
     /// Called once the runner's server is serving, with its API base URL and an
     /// operator token for this run's namespace.
     ///
@@ -47,27 +56,83 @@ pub struct Options {
     /// bundled reference app needs it to point its blob client at the server,
     /// and cannot be told sooner: the app has to be serving before this runner
     /// will read its manifest, and the API it must call does not exist until
-    /// after that. A third-party app is configured by whoever launched it and
-    /// leaves this `None`.
+    /// after that. An app in another process is configured over HTTP with
+    /// [`OnReady::post_to`].
     pub on_ready: Option<OnReady>,
 }
 
-/// What a readiness callback is handed: the API base URL, and an operator token.
-type ReadyFn = dyn Fn(&str, &str) + Send + Sync;
+/// What a readiness callback returns.
+///
+/// Fallible and asynchronous because the app under test is usually in another
+/// process: configuring it is a network call, and one that fails must stop the
+/// run rather than leave `blobs` and `truncation` failing for a reason that is
+/// not about the protocol.
+type ReadyFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+type ReadyFn = dyn Fn(String, String) -> ReadyFuture + Send + Sync;
 
 /// A callback invoked with `(api_base, operator_token)` once the runner is up.
 #[derive(Clone)]
 pub struct OnReady(Arc<ReadyFn>);
 
 impl OnReady {
-    /// Wrap a callback.
-    pub fn new(f: impl Fn(&str, &str) + Send + Sync + 'static) -> Self {
-        Self(Arc::new(f))
+    /// Wrap an asynchronous callback.
+    pub fn new<F, Fut>(f: F) -> Self
+    where
+        F: Fn(String, String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        Self(Arc::new(move |base, token| Box::pin(f(base, token))))
+    }
+
+    /// Wrap an in-process callback that cannot fail.
+    ///
+    /// For an app this program holds as a value — the bundled reference app,
+    /// which the battery starts itself. Configuring it is a field assignment, so
+    /// there is nothing to await and nothing to go wrong.
+    pub fn sync(f: impl Fn(&str, &str) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(move |base, token| {
+            f(&base, &token);
+            Box::pin(std::future::ready(Ok(())))
+        }))
+    }
+
+    /// Configure an app in another process by `POST`ing to a URL it serves.
+    ///
+    /// The body is `{"api_base": "...", "token": "..."}` (protocol §12.1).
+    ///
+    /// This is the mechanism a non-Rust SDK needs. The runner's API binds to an
+    /// ephemeral port and mints the token itself, so neither value exists until
+    /// after the app under test is already running — there is no earlier moment
+    /// at which whoever launched it could have supplied them. Without this,
+    /// `blobs` and `truncation` were unreachable for any app the runner did not
+    /// start, which was every app not written in Rust.
+    pub fn post_to(url: impl Into<String>) -> Self {
+        let url = url.into();
+        Self::new(move |api_base, token| {
+            let url = url.clone();
+            async move {
+                let response = reqwest::Client::new()
+                    .post(&url)
+                    .json(&serde_json::json!({ "api_base": api_base, "token": token }))
+                    .send()
+                    .await
+                    .with_context(|| format!("could not reach the app's configure URL {url}"))?;
+                let status = response.status();
+                if !status.is_success() {
+                    let body = response.text().await.unwrap_or_default();
+                    return Err(anyhow!(
+                        "the app answered {status} at {url}: {}",
+                        body.trim()
+                    ));
+                }
+                Ok(())
+            }
+        })
     }
 
     /// Invoke it.
-    pub fn call(&self, api_base: &str, token: &str) {
-        (self.0)(api_base, token)
+    pub async fn call(&self, api_base: &str, token: &str) -> Result<()> {
+        (self.0)(api_base.to_string(), token.to_string()).await
     }
 }
 
@@ -88,6 +153,7 @@ impl Default for Options {
             // reports a defect that is not there.
             case_timeout: Duration::from_secs(90),
             only: Vec::new(),
+            api_bind: "127.0.0.1:0".into(),
             on_ready: None,
         }
     }
@@ -160,7 +226,9 @@ impl Harness {
         // capability minter needs the address the app will actually reach. A
         // capability signed against the bind address is useless on any real
         // deployment, where that is `0.0.0.0`.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let listener = tokio::net::TcpListener::bind(&options.api_bind)
+            .await
+            .with_context(|| format!("could not bind the runner's API to {}", options.api_bind))?;
         let api_addr = listener.local_addr()?.to_string();
 
         let config = Config {

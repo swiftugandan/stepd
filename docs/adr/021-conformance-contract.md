@@ -165,6 +165,40 @@ specification will be used outside it.
 | Every declared suite actually runs a case | `every_declared_suite_actually_ran_a_case` |
 | The reference app reaches level 2 | `the_reference_app_passes_every_case_the_runner_can_drive` |
 | The conformance manifest schema rejects unknown suites and hazards | `spec/validate.py`, four negative cases |
+| An app in another process can reach the callback-dependent suites | `an_app_configured_over_http_reaches_the_suites_that_need_a_callback` |
+| …and that test is not vacuous | `without_any_callback_the_suites_that_need_one_fail` |
+| A failed configuration stops the run and names itself | `a_configure_url_that_does_not_answer_stops_the_run` |
+| A fixed API bind is honoured | `a_fixed_api_bind_is_honoured` |
+
+### What §12.1 left out (found 2026-08-25)
+
+The surface this ADR fixed was incomplete, and the omission had the same shape as
+the defects below: specified, plumbed, and unreachable by one line.
+
+§12.1 said what an app must *expose*. It never said how an app learns what it
+must *call* — and two suites need that. `blobs` reserves against
+`POST /v1/blobs:reserve` and `truncation` pages `GET /v1/runs/{id}/steps`, both
+bearer-authenticated. The runner binds its API to an ephemeral port and mints the
+token itself, so neither value exists before the app under test is already
+running: whoever launched the app could not have supplied them, which is what
+`Options::on_ready`'s own comment assumed they had.
+
+The consequence was invisible because the only app anyone ran was the bundled
+one, which the battery starts in-process and configures through a closure. For
+every other app — which is to say every app not written in Rust — two of the
+nineteen suites could not pass, whatever its SDK did. An honest implementation
+would have declared them, failed them, and had no way to tell whether the fault
+was its own.
+
+`POST /_conformance/configure` closes it, and `stepd conformance
+--app-configure-url` drives it. The reference app serves the route despite not
+needing it, because an endpoint no implementation has ever served is a
+specification nobody has tested.
+
+The general finding, which is §7 material: **a contract that says only what one
+side must expose is half a contract.** This one was written from the runner's
+point of view — what it needs to observe — and the direction it forgot was the
+one where the app is the caller.
 
 ### What the suite found
 

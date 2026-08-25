@@ -113,6 +113,22 @@ enum Command {
         /// Seconds a single case may wait for a run to settle.
         #[arg(long, default_value_t = 90)]
         case_timeout: u64,
+        /// URL on the app under test that accepts `{"api_base", "token"}`
+        /// once this runner's API is serving (protocol §12.1).
+        ///
+        /// Required for the `blobs` and `truncation` suites: both need the app
+        /// to call back into the server, and neither the address nor a token
+        /// exists until after the app is already running. Without it the app
+        /// should not declare those suites.
+        #[arg(long)]
+        app_configure_url: Option<String>,
+        /// Address this runner's API binds to. Ephemeral by default.
+        ///
+        /// Only needed for an app that must be told the address before it
+        /// starts; otherwise `--app-configure-url` tells it afterwards, which
+        /// avoids picking a port that might be taken.
+        #[arg(long, default_value = "127.0.0.1:0")]
+        api_bind: String,
     },
 }
 
@@ -184,6 +200,8 @@ async fn main() -> Result<()> {
             key,
             suites,
             case_timeout,
+            app_configure_url,
+            api_bind,
         } => {
             let report = stepd_conformance::run(stepd_conformance::Options {
                 app_url: app,
@@ -191,9 +209,14 @@ async fn main() -> Result<()> {
                 signing_key: key.into_bytes(),
                 case_timeout: std::time::Duration::from_secs(case_timeout),
                 only: suites,
-                // The app under test is somebody else's process, configured by
-                // whoever started it.
-                on_ready: None,
+                api_bind,
+                // The app under test is somebody else's process. It cannot have
+                // been configured by whoever started it: this runner's API binds
+                // to an ephemeral port and mints its own token, so neither value
+                // existed at that point. `--app-configure-url` is how they reach
+                // it, and leaving it unset is only correct for an app that
+                // declares neither `blobs` nor `truncation`.
+                on_ready: app_configure_url.map(stepd_conformance::OnReady::post_to),
             })
             .await?;
 

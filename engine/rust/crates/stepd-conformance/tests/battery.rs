@@ -60,7 +60,7 @@ async fn run_battery(only: &[&str]) -> Option<Report> {
         app_url,
         database_url,
         only: only.iter().map(|s| s.to_string()).collect(),
-        on_ready: Some(stepd_conformance::OnReady::new(move |api_base, token| {
+        on_ready: Some(stepd_conformance::OnReady::sync(move |api_base, token| {
             state.configure_blobs(api_base, token)
         })),
         ..Default::default()
@@ -161,6 +161,155 @@ async fn every_suite_in_the_protocol_is_driven_by_this_runner() {
             "suite '{suite}' produced no case at all"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_app_configured_over_http_reaches_the_suites_that_need_a_callback() {
+    // The path a non-Rust SDK takes, driven against the app we have.
+    //
+    // Every other test here configures the reference app in-process, through a
+    // closure over its `State`. No app in another process can be configured that
+    // way, and until `--app-configure-url` existed there was no other way at
+    // all: the runner's API binds to an ephemeral port and mints its own token,
+    // so `blobs` and `truncation` were unreachable for every app not written in
+    // Rust. That is not a limitation anyone would find by reading the CLI — it
+    // reads as though the app's own launcher supplies these — so it needs a test
+    // that goes over the wire rather than round it.
+    let Some(database_url) = fresh_database().await else {
+        eprintln!("SKIPPED: set STEPD_TEST_DATABASE_URL to run the conformance battery");
+        return;
+    };
+    let Some((app_url, _state, _app)) = serve_reference().await else {
+        eprintln!("SKIPPED: set STEPD_TEST_DATABASE_URL to run the conformance battery");
+        return;
+    };
+
+    // Deliberately no in-process handle: `_state` is dropped unused, so if the
+    // HTTP round trip does not configure the app, nothing else will.
+    let report = stepd_conformance::run(Options {
+        app_url: app_url.clone(),
+        database_url,
+        only: vec!["blobs".into(), "truncation".into()],
+        on_ready: Some(stepd_conformance::OnReady::post_to(format!(
+            "{app_url}/_conformance/configure"
+        ))),
+        ..Default::default()
+    })
+    .await
+    .expect("the battery ran");
+
+    eprintln!("{report}");
+    assert!(report.suite_passed("blobs"), "{report}");
+    assert!(report.suite_passed("truncation"), "{report}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fixed_api_bind_is_honoured() {
+    // For the app that has to know the address before it starts — a container
+    // with the URL already in its environment, which cannot be told afterwards.
+    // The default stays ephemeral, so this is the only thing that proves the
+    // option is wired to the listener rather than ignored.
+    let Some(database_url) = fresh_database().await else {
+        eprintln!("SKIPPED: set STEPD_TEST_DATABASE_URL to run the conformance battery");
+        return;
+    };
+    let Some((app_url, state, _app)) = serve_reference().await else {
+        eprintln!("SKIPPED: set STEPD_TEST_DATABASE_URL to run the conformance battery");
+        return;
+    };
+
+    // Ask the OS for a free port and hand it back, rather than picking a number
+    // that CI might already be using.
+    let port = {
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        probe.local_addr().unwrap().port()
+    };
+
+    let report = stepd_conformance::run(Options {
+        app_url,
+        database_url,
+        only: vec!["memoization".into()],
+        api_bind: format!("127.0.0.1:{port}"),
+        on_ready: Some(stepd_conformance::OnReady::sync(move |api_base, token| {
+            state.configure_blobs(api_base, token)
+        })),
+        ..Default::default()
+    })
+    .await
+    .expect("the battery ran on the requested port");
+
+    // The suite passing is what says the server really came up there: every
+    // attempt in it was signed, pushed and committed through that socket.
+    assert!(report.suite_passed("memoization"), "{report}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn without_any_callback_the_suites_that_need_one_fail() {
+    // The control for the test above. If `blobs` passed unconfigured, that test
+    // would prove nothing about the HTTP round trip — it would only prove the
+    // suite is insensitive to whether the callback happened at all.
+    //
+    // It also pins the behaviour that matters for an SDK author: declaring a
+    // suite you cannot support has to fail. The manifest's whole design punishes
+    // over-declaring, and a `blobs` that quietly passed with no blob client
+    // would be the runner certifying around its own gap.
+    let Some(database_url) = fresh_database().await else {
+        eprintln!("SKIPPED: set STEPD_TEST_DATABASE_URL to run the conformance battery");
+        return;
+    };
+    let Some((app_url, _state, _app)) = serve_reference().await else {
+        eprintln!("SKIPPED: set STEPD_TEST_DATABASE_URL to run the conformance battery");
+        return;
+    };
+
+    let report = stepd_conformance::run(Options {
+        app_url,
+        database_url,
+        only: vec!["blobs".into()],
+        on_ready: None,
+        ..Default::default()
+    })
+    .await
+    .expect("the battery ran");
+
+    assert!(
+        !report.suite_passed("blobs"),
+        "blobs passed with no blob client configured, so the callback proves nothing:\n{report}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_configure_url_that_does_not_answer_stops_the_run() {
+    // The failure has to be loud and attributed to configuration. The quiet
+    // alternative is worse than useless: `blobs` fails, the report says the app
+    // diverges from the protocol, and the actual cause is a typo'd URL. An SDK
+    // author would go looking in their blob client.
+    let Some(database_url) = fresh_database().await else {
+        eprintln!("SKIPPED: set STEPD_TEST_DATABASE_URL to run the conformance battery");
+        return;
+    };
+    let Some((app_url, _state, _app)) = serve_reference().await else {
+        eprintln!("SKIPPED: set STEPD_TEST_DATABASE_URL to run the conformance battery");
+        return;
+    };
+
+    let err = stepd_conformance::run(Options {
+        app_url: app_url.clone(),
+        database_url,
+        only: vec!["blobs".into()],
+        on_ready: Some(stepd_conformance::OnReady::post_to(format!(
+            "{app_url}/_conformance/no-such-route"
+        ))),
+        ..Default::default()
+    })
+    .await
+    .expect_err("a configure URL that 404s must fail the run, not the blobs suite");
+
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("did not accept its configuration"),
+        "the error must name configuration as the cause, got: {text}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

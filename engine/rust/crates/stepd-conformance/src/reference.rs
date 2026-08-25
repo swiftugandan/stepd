@@ -857,7 +857,15 @@ pub fn router(reference: ReferenceApp) -> axum::Router {
         run: Uuid,
     }
 
+    /// §12.1: what the runner posts once its API exists.
+    #[derive(Deserialize)]
+    struct Configure {
+        api_base: String,
+        token: String,
+    }
+
     let ReferenceApp { app, state } = reference;
+    let configure_state = state.clone();
     // Each probe closes over this instance's state. A `reset` therefore clears
     // this app's log and no other's, which is what §12.1 means by "the effect
     // log" — the app under test has exactly one.
@@ -876,6 +884,19 @@ pub fn router(reference: ReferenceApp) -> axum::Router {
             post(move || async move {
                 reset_state.reset_effects();
                 axum::Json(serde_json::json!({ "reset": true }))
+            }),
+        )
+        // §12.1. The battery configures this app in-process, so the reference
+        // app does not need this route — it is here because every app that is
+        // *not* in this process does, and an endpoint no implementation of the
+        // spec has ever served is a specification nobody has tested. Driving
+        // the bundled app through it is what makes the shape a non-Rust SDK
+        // must implement something that already works.
+        .route(
+            "/_conformance/configure",
+            post(move |axum::Json(c): axum::Json<Configure>| async move {
+                configure_state.configure_blobs(&c.api_base, &c.token);
+                axum::Json(serde_json::json!({ "configured": true }))
             }),
         )
         .route(
