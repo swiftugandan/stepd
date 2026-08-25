@@ -3,8 +3,8 @@
   "ops": [
     { "op": "wait_event", "id": "approval", "hash": "c0ff3312aa10bb47",
       "event": "order.approved",
-      "expr": "event.data.order_id == 4711",
-      "timeout": "P7D",
+      "since": "run_start",
+      "timeout_at": "2026-08-26T10:00:00Z",
       "prompt": {
         "title": "Approve refund of £42.00",
         "detail": { "amount": 4200, "reason": "damaged in transit" },

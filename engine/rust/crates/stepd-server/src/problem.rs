@@ -139,17 +139,20 @@ impl From<stepd_core::Error> for Problem {
 
 impl IntoResponse for Problem {
     fn into_response(self) -> Response {
-        let body = serde_json::json!({
-            "type": "about:blank",
-            "title": self.title,
-            "status": self.status.as_u16(),
-            "detail": self.detail,
-            "code": self.code,
-        });
+        let body = stepd_proto::ProblemBody {
+            problem_type: "about:blank".into(),
+            title: self.title.to_string(),
+            status: self.status.as_u16(),
+            detail: Some(self.detail),
+            instance: None,
+            code: Some(self.code.to_string()),
+            run_id: None,
+            op: None,
+        };
         let mut res = (
             self.status,
             [("content-type", "application/problem+json")],
-            body.to_string(),
+            serde_json::to_string(&body).unwrap_or_else(|_| "{}".into()),
         )
             .into_response();
         if self.status == StatusCode::TOO_MANY_REQUESTS {

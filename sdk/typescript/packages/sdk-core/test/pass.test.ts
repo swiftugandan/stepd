@@ -138,11 +138,18 @@ describe('runPass', () => {
     const d = new Driver();
     const ctx = ctxOf(d);
     const result = await runPass(ctx, async (c) => {
-      c.emit({ specversion: '1.0', source: 's', type: 'shipped', data: null });
+      c.emit({
+        specversion: '1.0',
+        source: 's',
+        type: 'shipped',
+        data: null,
+        stepdkey: 'order:4711',
+      });
       c.log('info', 'on the way');
       throw fatal('stop');
     });
     expect(result.emit).toHaveLength(1);
+    expect(result.emit[0]?.stepdkey).toBe('order:4711');
     expect(result.logs).toHaveLength(1);
     // Drained, so a second look finds nothing to send twice.
     expect(ctx.takeEmit()).toHaveLength(0);

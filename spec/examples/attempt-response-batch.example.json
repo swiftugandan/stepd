@@ -24,7 +24,7 @@
       "hash": "3333333333333333",
       "event": "kyc.completed",
       "since": "run_start",
-      "timeout": "P3D"
+      "timeout_at": "2026-08-23T10:00:00Z"
     }
   ]
 }

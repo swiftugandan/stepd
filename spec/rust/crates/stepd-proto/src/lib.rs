@@ -13,11 +13,13 @@
 #![warn(missing_docs)]
 
 pub mod hash;
+pub mod manifest;
 pub mod ops;
 pub mod sig;
 pub mod types;
 
 pub use hash::{step_hash, OccurrenceCounter};
+pub use manifest::*;
 pub use ops::{Attempt, AttemptResponse, EnvelopeError, Op, RecordedStep, RunContext};
 pub use sig::{sign, verify, SignatureError};
 pub use types::*;

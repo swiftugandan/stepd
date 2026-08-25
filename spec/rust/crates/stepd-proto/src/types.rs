@@ -93,7 +93,7 @@ pub struct Event {
     #[serde(default = "default_specversion")]
     pub specversion: String,
     /// Producer-assigned identifier.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// Producing context.
     pub source: String,
@@ -101,7 +101,7 @@ pub struct Event {
     #[serde(rename = "type")]
     pub event_type: String,
     /// Producer timestamp.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time: Option<DateTime<Utc>>,
     /// Payload.
     #[serde(default)]
@@ -378,11 +378,23 @@ mod tests {
 
     #[test]
     fn event_uses_cloudevents_field_names() {
-        let e = Event::new("order.created", "/shop", serde_json::json!({"id": 1}));
+        let mut e = Event::new("order.created", "/shop", serde_json::json!({"id": 1}));
+        e.key = Some("order:4711".into());
+        e.idempotency = Some("4711".into());
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v["specversion"], "1.0");
         assert_eq!(v["type"], "order.created");
         assert!(v.get("event_type").is_none(), "must serialise as `type`");
+        assert_eq!(v["stepdkey"], "order:4711");
+        assert_eq!(v["stepdidempotency"], "4711");
+        assert!(
+            v.get("key").is_none(),
+            "must serialise as `stepdkey`; a `key` field is ignored on ingest"
+        );
+        assert!(
+            v.get("idempotency").is_none(),
+            "must serialise as `stepdidempotency`"
+        );
     }
 }
 

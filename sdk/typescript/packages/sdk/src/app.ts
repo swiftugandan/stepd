@@ -1,4 +1,4 @@
-import { sha256Hex, type Json } from '@stepd/protocol';
+import { sha256Hex, type AppManifest, type FunctionConfig } from '@stepd/protocol';
 import type { Function } from './function.js';
 import { JournalSource } from './journal.js';
 
@@ -75,15 +75,13 @@ export class App {
   }
 
   /** The `AppManifest` this app registers with (§3). */
-  manifest(): Json {
-    const fns = [...this.#functions.values()]
+  manifest(): AppManifest {
+    const fns: FunctionConfig[] = [...this.#functions.values()]
       .map((f) => f.config())
       // Sorted so the checksum is a function of content, not of insertion order
       // — otherwise every restart looks like a config change and the server
       // re-registers for nothing.
-      .sort((a, b) =>
-        String((a as Record<string, Json>).id).localeCompare(String((b as Record<string, Json>).id)),
-      );
+      .sort((a, b) => a.id.localeCompare(b.id));
 
     return {
       protocol: '1',

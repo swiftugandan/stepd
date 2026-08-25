@@ -46,12 +46,27 @@
         },
         "hash": {
           "$ref": "common.schema.json#/$defs/stepHash"
+        }
+      }
+    },
+    "step": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        }
+      ],
+      "type": "object",
+      "required": [
+        "op",
+        "id",
+        "hash"
+      ],
+      "properties": {
+        "op": {
+          "const": "step"
         },
-        "started_at": {
-          "$ref": "common.schema.json#/$defs/timestamp"
-        },
-        "ended_at": {
-          "$ref": "common.schema.json#/$defs/timestamp"
+        "data": {
+          "$ref": "common.schema.json#/$defs/payload"
         },
         "meta": {
           "type": "object",
@@ -81,27 +96,6 @@
             }
           },
           "additionalProperties": true
-        }
-      }
-    },
-    "step": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/base"
-        }
-      ],
-      "type": "object",
-      "required": [
-        "op",
-        "id",
-        "hash"
-      ],
-      "properties": {
-        "op": {
-          "const": "step"
-        },
-        "data": {
-          "$ref": "common.schema.json#/$defs/payload"
         },
         "error": {
           "$ref": "common.schema.json#/$defs/error"
@@ -127,19 +121,8 @@
       "required": [
         "op",
         "id",
-        "hash"
-      ],
-      "oneOf": [
-        {
-          "required": [
-            "until"
-          ]
-        },
-        {
-          "required": [
-            "duration"
-          ]
-        }
+        "hash",
+        "until"
       ],
       "properties": {
         "op": {
@@ -147,12 +130,10 @@
         },
         "until": {
           "$ref": "common.schema.json#/$defs/timestamp"
-        },
-        "duration": {
-          "$ref": "common.schema.json#/$defs/duration"
         }
       },
-      "unevaluatedProperties": false
+      "unevaluatedProperties": false,
+      "description": "A durable timer. The wire carries an absolute wake time. SDKs that take a duration convert it to `until` before emitting the op."
     },
     "waitEvent": {
       "allOf": [
@@ -175,11 +156,9 @@
           "type": "string",
           "minLength": 1
         },
-        "expr": {
-          "$ref": "common.schema.json#/$defs/cel"
-        },
-        "timeout": {
-          "$ref": "common.schema.json#/$defs/duration"
+        "timeout_at": {
+          "$ref": "common.schema.json#/$defs/timestamp",
+          "description": "Absolute deadline. SDKs that take a duration convert it before emitting."
         },
         "prompt": {
           "type": "object",
@@ -254,13 +233,6 @@
         "input": {
           "$ref": "common.schema.json#/$defs/payload"
         },
-        "key": {
-          "type": "string",
-          "maxLength": 512
-        },
-        "timeout": {
-          "$ref": "common.schema.json#/$defs/duration"
-        },
         "detach": {
           "type": "boolean",
           "default": false
@@ -279,6 +251,7 @@
         "op",
         "id",
         "hash",
+        "target_run",
         "event"
       ],
       "properties": {
@@ -287,9 +260,6 @@
         },
         "target_run": {
           "$ref": "common.schema.json#/$defs/uuidv7"
-        },
-        "target_key": {
-          "type": "string"
         },
         "event": {
           "$ref": "event.schema.json"
@@ -330,9 +300,6 @@
         "step": {
           "$ref": "common.schema.json#/$defs/stepId"
         },
-        "hash": {
-          "$ref": "common.schema.json#/$defs/stepHash"
-        },
         "error": {
           "$ref": "common.schema.json#/$defs/error"
         }
@@ -356,14 +323,6 @@
         },
         "input": {
           "$ref": "common.schema.json#/$defs/payload"
-        },
-        "carry": {
-          "type": "array",
-          "maxItems": 32,
-          "items": {
-            "$ref": "common.schema.json#/$defs/stepId"
-          },
-          "description": "Step ids whose results are copied into the successor's input under `carried`"
         }
       },
       "unevaluatedProperties": false

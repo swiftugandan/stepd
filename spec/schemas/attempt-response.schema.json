@@ -28,60 +28,10 @@
         "$ref": "event.schema.json"
       }
     },
-    "logs": {
-      "type": "array",
-      "maxItems": 500,
-      "items": {
-        "type": "object",
-        "required": [
-          "level",
-          "message"
-        ],
-        "additionalProperties": false,
-        "properties": {
-          "level": {
-            "enum": [
-              "trace",
-              "debug",
-              "info",
-              "warn",
-              "error"
-            ]
-          },
-          "message": {
-            "type": "string",
-            "maxLength": 8192
-          },
-          "at": {
-            "$ref": "common.schema.json#/$defs/timestamp"
-          },
-          "step": {
-            "$ref": "common.schema.json#/$defs/stepId"
-          },
-          "fields": {
-            "type": "object"
-          }
-        }
-      }
-    },
-    "diagnostics": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "orphaned_steps": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "Recorded hashes not encountered during this replay pass"
-        },
-        "replay_ms": {
-          "type": "number",
-          "minimum": 0
-        },
-        "steps_replayed": {
-          "type": "integer",
-          "minimum": 0
-        }
-      }
+    "orphaned_steps": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Recorded hashes not encountered during this replay pass"
     }
   },
   "allOf": [
@@ -143,6 +93,15 @@
             "maxItems": 1
           }
         }
+      }
+    },
+    {
+      "title": "join is retired and refused rather than ignored",
+      "description": "ADR-023. additionalProperties: false already rejects it; this names the field so a sender is not told the envelope was merely malformed (§11).",
+      "not": {
+        "required": [
+          "join"
+        ]
       }
     }
   ]

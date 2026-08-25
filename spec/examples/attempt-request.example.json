@@ -1,17 +1,17 @@
 {
   "protocol": "1",
   "attempt": 4,
-  "fence": "01J8ZQ8F3K7N2P5R9T1V4W6X8Y",
+  "fence": 4,
   "deadline": "2026-08-19T10:01:00Z",
   "run": {
     "id": "01926f5a-1c40-7c9a-9f3e-2b7d4e6a8c10",
     "function_id": "order-fulfilment",
-    "function_version": "3",
     "namespace": "prod",
     "key": "order:4711",
     "started_at": "2026-08-19T10:00:00Z",
     "cancelling": false,
-    "parent": null
+    "lineage_id": "01926f5a-1c40-7c9a-9f3e-2b7d4e6a8c10",
+    "chain_position": 0
   },
   "events": [
     {
@@ -20,7 +20,6 @@
       "source": "/shop/checkout",
       "type": "order.created",
       "time": "2026-08-19T09:59:58Z",
-      "datacontenttype": "application/json",
       "data": { "order_id": 4711, "total": 8400, "tenant": "acme" },
       "stepdkey": "order:4711",
       "stepdidempotency": "4711"
@@ -29,11 +28,10 @@
   "steps": {
     "3f2a91c4b70e1d55": {
       "id": "charge", "op": "step", "status": "completed",
-      "data": { "tx": "ch_1" }, "completed_at": "2026-08-19T10:00:02Z", "attempts": 1
+      "data": { "tx": "ch_1" }
     },
     "a71bd0e2ff34c918": {
-      "id": "cooldown", "op": "sleep", "status": "completed",
-      "completed_at": "2026-08-20T10:00:02Z"
+      "id": "cooldown", "op": "sleep", "status": "completed"
     },
     "c0ff3312aa10bb47": {
       "id": "approval", "op": "wait_event", "status": "completed",

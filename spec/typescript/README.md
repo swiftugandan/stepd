@@ -11,7 +11,7 @@ it, and a contract owned by one of its consumers stops being a contract
 
 ```bash
 pnpm install
-pnpm test          # 103 tests, nothing to start first
+pnpm test          # 122 tests, nothing to start first
 pnpm typecheck
 pnpm build         # ESM, CJS and .d.ts
 ```
@@ -21,10 +21,11 @@ pnpm build         # ESM, CJS and .d.ts
 | | |
 |---|---|
 | `types.ts` | `Attempt`, `AttemptResponse`, the eight `Op` variants, `RecordedStep`, `BlobRef`, `ExternalRef`, and the `stepd-*` header names |
+| `manifest.ts` | `AppManifest`, `FunctionConfig`, blob reserve, `ProblemBody`, `ConformanceManifest` |
 | `hash.ts` | `stepHash(functionId, stepId, occurrence)` and `OccurrenceCounter` |
 | `signature.ts` | `sign` and `verify` for `stepd-signature: t=,n=,v1=` |
 | `envelope.ts` | `validateEnvelope` — every §5.2 rule, including refusing the retired `join` field by name |
-| `attempt.ts` | `decodeAttempt`, lenient where the schemas and the wire disagree |
+| `attempt.ts` | `decodeAttempt` |
 
 ## Two things here are load-bearing
 
@@ -59,15 +60,10 @@ the hash vectors are `("a","bc")` and `("ab","c")`, which exist to prove the
 `0x1F` separator does something; a Rust test asserts they still differ, because a
 pair of vectors that agree has silently stopped testing anything.
 
-## Where this and the schemas disagree
+## Agreement with the schemas is checked, not assumed
 
-`spec/schemas/` and the shipping wire format differ in about a dozen places —
-`fence` is a string in the schema and an integer on the wire; `sleep` accepts
-`duration` there and only `until` here; `wait_event` carries `expr` and `timeout`
-there, `timeout_at` and no `expr` here. The server parses the Rust crate, so the
-crate is what an SDK must match today.
-
-`decodeAttempt` therefore reads leniently — a `fence` arriving as either a number
-or a numeric string is accepted — while everything this package *emits* matches
-the wire. Which side of each divergence is the defect is tracked separately; do
-not assume the schemas are decorative, and do not assume they are authoritative.
+Committed examples under [`../examples/`](../examples) are the documents.
+`test/examples.test.ts` decodes every attempt request, validates every
+envelope, and type-asserts the remaining wire examples. `spec/validate.py` and
+`stepd-proto/tests/examples.rs` check the same files. Either side rejecting a
+document the other accepts fails CI.

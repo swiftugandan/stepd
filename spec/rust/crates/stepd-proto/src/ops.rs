@@ -97,7 +97,7 @@ pub enum Op {
         /// Step hash.
         hash: String,
         /// Result. Absent when `error` is present.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         data: Option<serde_json::Value>,
         /// Observability metadata (model, tokens, cost). Opaque to the engine.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,7 +142,7 @@ pub enum Op {
         /// Function to call.
         function: String,
         /// Input for the child.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         input: Option<serde_json::Value>,
         /// Fire and forget: the child's lifecycle becomes independent.
         #[serde(default)]
@@ -166,13 +166,13 @@ pub enum Op {
         /// Step hash.
         hash: String,
         /// Successor input.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         input: Option<serde_json::Value>,
     },
     /// The handler returned.
     Done {
         /// Final output.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         data: Option<serde_json::Value>,
     },
     /// The handler raised.

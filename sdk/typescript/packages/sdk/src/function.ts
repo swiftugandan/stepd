@@ -1,20 +1,7 @@
-import type { Json } from '@stepd/protocol';
+import type { FunctionConfig, Trigger } from '@stepd/protocol';
 import type { Ctx } from '@stepd/sdk-core';
 
-/** What starts a run (§3). */
-export type Trigger =
-  | { type: 'event'; event: string; expr?: string }
-  | {
-      type: 'cron';
-      cron: string;
-      tz: string;
-      catchup?: 'one' | 'skip' | 'all';
-      catchup_limit?: number;
-      misfire_window?: string;
-      singleton?: boolean;
-      run_key?: string;
-    }
-  | { type: 'invoke' };
+export type { Trigger };
 
 /**
  * What to do when the server was down over a fire time.
@@ -174,13 +161,13 @@ export class Function {
   }
 
   /** The `FunctionConfig` sent to the server. */
-  config(): Json {
-    const v: Record<string, Json> = {
+  config(): FunctionConfig {
+    const v: FunctionConfig = {
       id: this.id,
       version: this.#version,
-      triggers: this.#triggers as unknown as Json,
-      retries: this.#retries as unknown as Json,
-      timeouts: this.#timeouts as unknown as Json,
+      triggers: this.#triggers,
+      retries: this.#retries,
+      timeouts: this.#timeouts,
     };
     if (this.#name !== undefined) v.name = this.#name;
     if (this.#keyExpr !== undefined) v.key_expr = this.#keyExpr;

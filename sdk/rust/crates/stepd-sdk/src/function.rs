@@ -19,6 +19,37 @@ use stepd_sdk_core::{BoxFut, Ctx, Handler};
 
 use crate::executor::{ErasedHandler, LocalExecutor};
 
+fn wire_trigger(t: &Trigger) -> stepd_proto::Trigger {
+    match t {
+        Trigger::Event { event, expr } => stepd_proto::Trigger::Event {
+            event: event.clone(),
+            expr: expr.clone(),
+        },
+        Trigger::Cron {
+            cron,
+            tz,
+            catchup,
+            catchup_limit,
+            misfire_window,
+            singleton,
+            run_key,
+        } => stepd_proto::Trigger::Cron {
+            cron: cron.clone(),
+            tz: tz.clone(),
+            catchup: catchup.as_deref().map(|s| match s {
+                "skip" => stepd_proto::CatchUp::Skip,
+                "all" => stepd_proto::CatchUp::All,
+                _ => stepd_proto::CatchUp::One,
+            }),
+            catchup_limit: catchup_limit.map(|n| n as i32),
+            misfire_window: misfire_window.clone(),
+            singleton: singleton.unwrap_or(false),
+            run_key: run_key.clone(),
+        },
+        Trigger::Invoke => stepd_proto::Trigger::Invoke,
+    }
+}
+
 /// What starts a run.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -342,27 +373,45 @@ impl Function {
     }
 
     /// The `FunctionConfig` sent to the server.
-    pub fn config(&self) -> serde_json::Value {
-        let mut v = serde_json::json!({
-            "id": self.id,
-            "version": self.version,
-            "triggers": self.triggers,
-            "retries": self.retries,
-            "timeouts": self.timeouts,
-        });
-        if let Some(n) = &self.name {
-            v["name"] = serde_json::json!(n);
+    pub fn config(&self) -> stepd_proto::FunctionConfig {
+        stepd_proto::FunctionConfig {
+            id: self.id.clone(),
+            version: Some(self.version.clone()),
+            name: self.name.clone(),
+            description: None,
+            triggers: self.triggers.iter().map(wire_trigger).collect(),
+            key_expr: self.key_expr.clone(),
+            idempotency_expr: None,
+            priority_expr: None,
+            concurrency: None,
+            rate_limit: None,
+            debounce: None,
+            batch: None,
+            retries: Some(stepd_proto::Retries {
+                max_attempts: Some(self.retries.max_attempts as i32),
+                backoff: Some(match self.retries.backoff.as_str() {
+                    "linear" => stepd_proto::Backoff::Linear,
+                    "constant" => stepd_proto::Backoff::Constant,
+                    _ => stepd_proto::Backoff::Exponential,
+                }),
+                initial: Some(self.retries.initial.clone()),
+                max: Some(self.retries.max.clone()),
+                jitter: Some(self.retries.jitter),
+            }),
+            timeouts: Some(stepd_proto::Timeouts {
+                attempt: Some(self.timeouts.attempt.clone()),
+                run: Some(self.timeouts.run.clone()),
+                start: None,
+            }),
+            cancel_on: None,
+            on_failure: None,
+            singleton: self.singleton,
+            input_schema: None,
+            output_schema: None,
+            inbox: None,
+            limits: None,
+            on_cancel: self.on_cancel,
         }
-        if let Some(k) = &self.key_expr {
-            v["key_expr"] = serde_json::json!(k);
-        }
-        if self.singleton {
-            v["singleton"] = serde_json::json!(true);
-        }
-        if self.on_cancel {
-            v["on_cancel"] = serde_json::json!(true);
-        }
-        v
     }
 
     /// Problems worth refusing to start over (F-DX-6).
@@ -486,27 +535,30 @@ impl App {
     }
 
     /// The `AppManifest` this app registers with.
-    pub fn manifest(&self) -> serde_json::Value {
-        let mut fns: Vec<serde_json::Value> = self.functions.values().map(|f| f.config()).collect();
+    pub fn manifest(&self) -> stepd_proto::AppManifest {
+        let mut functions: Vec<stepd_proto::FunctionConfig> =
+            self.functions.values().map(|f| f.config()).collect();
         // Sorted so the checksum is a function of content, not of hash-map
         // iteration order — otherwise every restart looks like a config change
         // and the server re-registers for nothing.
-        fns.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+        functions.sort_by(|a, b| a.id.cmp(&b.id));
 
-        let body = serde_json::to_string(&fns).unwrap_or_default();
+        let body = serde_json::to_string(&functions).unwrap_or_default();
         let checksum = {
             use sha2::{Digest, Sha256};
             format!("sha256:{}", hex::encode(Sha256::digest(body.as_bytes())))
         };
 
-        serde_json::json!({
-            "protocol": stepd_proto::PROTOCOL_VERSION,
-            "app_id": self.app_id,
-            "url": self.url,
-            "sdk": crate::SDK_VERSION,
-            "checksum": checksum,
-            "functions": fns,
-        })
+        stepd_proto::AppManifest {
+            protocol: stepd_proto::PROTOCOL_VERSION.into(),
+            app_id: self.app_id.clone(),
+            url: self.url.clone(),
+            sdk: Some(crate::SDK_VERSION.into()),
+            checksum: Some(checksum),
+            env: None,
+            capabilities: None,
+            functions,
+        }
     }
 
     /// Every lint finding across the app's functions.
@@ -653,8 +705,10 @@ mod tests {
                         .on_event("e")
                         .run(|_: &Ctx| async { Ok(1) }),
                 )
-                .manifest()["checksum"]
+                .manifest()
+                .checksum
                 .clone()
+                .unwrap()
         };
         // Hash-map iteration order differs between runs; the checksum must not,
         // or the server re-registers on every restart for no reason.

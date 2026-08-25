@@ -8,38 +8,18 @@
 
 use axum::extract::State;
 use axum::Json;
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use stepd_core::cron::{CatchUp, Schedule};
 use stepd_core::traits::{AppTarget, CronRegistration, ExprEngine};
 use stepd_core::{Error, Result, TargetResolver};
+use stepd_proto::{AppManifest, CatchUp as WireCatchUp, FunctionConfig, ManifestError, Trigger};
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::auth::{Principal, Role};
 use crate::problem::{ApiResult, Problem};
 use crate::ServerState;
-
-/// The manifest an app registers with (protocol §3).
-#[derive(Debug, Deserialize)]
-pub struct AppManifest {
-    /// Protocol major version the app speaks.
-    pub protocol: String,
-    /// Stable app identity within the namespace.
-    pub app_id: String,
-    /// Endpoint the server will call.
-    pub url: String,
-    /// Language and version, for the console.
-    #[serde(default)]
-    pub sdk: Option<String>,
-    /// Digest over the functions array; lets the server skip a no-op update.
-    #[serde(default)]
-    pub checksum: Option<String>,
-    /// The function configurations being registered.
-    #[serde(default)]
-    pub functions: Vec<serde_json::Value>,
-}
 
 /// The protocol major one below the current one, if there is one.
 fn previous_protocol() -> Option<String> {
@@ -65,56 +45,32 @@ fn protocol_supported(version: &str) -> bool {
 /// anyone is told.
 fn cron_registrations(
     namespace: &str,
-    function_id: &str,
-    config: &serde_json::Value,
+    function: &FunctionConfig,
 ) -> std::result::Result<Vec<CronRegistration>, String> {
     let mut out = Vec::new();
 
-    let triggers = config
-        .get("triggers")
-        .and_then(|v| v.as_array())
-        .map(|v| v.as_slice())
-        .unwrap_or(&[]);
-
-    for (idx, t) in triggers.iter().enumerate() {
-        if t.get("type").and_then(|v| v.as_str()) != Some("cron") {
+    for (idx, t) in function.triggers.iter().enumerate() {
+        let Trigger::Cron {
+            cron,
+            tz,
+            catchup,
+            catchup_limit,
+            misfire_window,
+            singleton,
+            run_key,
+        } = t
+        else {
             continue;
-        }
-
-        let expr = t
-            .get("cron")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "a cron trigger has no `cron` expression".to_string())?;
-        let tz = t.get("tz").and_then(|v| v.as_str()).unwrap_or("UTC");
+        };
 
         // Parsed now, so an expression that cannot be scheduled cannot be
         // stored. The parser also rejects the dialect extensions (`L`, `W`, `#`)
         // by name rather than misinterpreting them, which matters most here:
         // a schedule that fires at the wrong time is worse than one that
         // refuses to register.
-        let schedule = Schedule::parse(expr, tz).map_err(|e| format!("cron trigger {idx}: {e}"))?;
+        let schedule = Schedule::parse(cron, tz).map_err(|e| format!("cron trigger {idx}: {e}"))?;
 
-        let catchup = t.get("catchup").and_then(|v| v.as_str()).unwrap_or("one");
-        if !matches!(catchup, "one" | "skip" | "all") {
-            return Err(format!(
-                "cron trigger {idx}: catchup '{catchup}' is not one of one, skip, all"
-            ));
-        }
-
-        let catchup_limit = t
-            .get("catchup_limit")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(10);
-        if !(1..=1000).contains(&catchup_limit) {
-            return Err(format!(
-                "cron trigger {idx}: catchup_limit {catchup_limit} is outside 1–1000"
-            ));
-        }
-
-        let window_text = t
-            .get("misfire_window")
-            .and_then(|v| v.as_str())
-            .unwrap_or("PT1H");
+        let window_text = misfire_window.as_deref().unwrap_or("PT1H");
         let window = stepd_proto::iso8601_seconds(window_text).ok_or_else(|| {
             format!(
                 "cron trigger {idx}: misfire_window '{window_text}' is not an ISO 8601 duration \
@@ -128,39 +84,34 @@ fn cron_registrations(
             ));
         }
 
-        let singleton = t
-            .get("singleton")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let run_key = t
-            .get("run_key")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-
-        // Overlap control needs something to be exclusive on. Accepting this
-        // pair would silently give the function no overlap control — which is
-        // the single property the author asked for by writing `singleton`.
-        if singleton && run_key.is_none() {
-            return Err(format!(
-                "cron trigger {idx}: singleton requires run_key; without one there is nothing \
-                 for the schedule to be exclusive on"
-            ));
-        }
-
         out.push(CronRegistration {
             namespace: namespace.to_string(),
-            function_id: function_id.to_string(),
+            function_id: function.id.clone(),
             trigger_idx: idx as i32,
             schedule,
-            catchup: CatchUp::parse(catchup),
-            catchup_limit: catchup_limit as i32,
+            catchup: match catchup {
+                Some(WireCatchUp::Skip) => CatchUp::Skip,
+                Some(WireCatchUp::All) => CatchUp::All,
+                Some(WireCatchUp::One) | None => CatchUp::One,
+            },
+            catchup_limit: catchup_limit.unwrap_or(10),
             misfire_window: chrono::Duration::seconds(window),
-            singleton,
-            run_key,
+            singleton: *singleton,
+            run_key: run_key.clone(),
         });
     }
 
     Ok(out)
+}
+
+fn manifest_problem(e: ManifestError) -> Problem {
+    let code = match e {
+        ManifestError::NoTriggers(_) => "bad_function",
+        ManifestError::SingletonWithoutKey { .. } => "bad_cron",
+        ManifestError::CatchUpLimit { .. } => "bad_cron",
+        ManifestError::BadDuration { .. } => "bad_function",
+    };
+    Problem::bad_request(code, e.to_string())
 }
 
 /// `PUT /v1/apps`
@@ -201,6 +152,8 @@ pub async fn register(
             )
         })?;
 
+    manifest.validate().map_err(manifest_problem)?;
+
     // Compile every expression now, at registration, where a human is watching.
     //
     // Deferring it to the ingest path means a typo in a trigger predicate
@@ -209,36 +162,11 @@ pub async fn register(
     // predicate that legitimately did not match. Failing here costs one bad
     // deploy; failing there costs an afternoon of "why did nothing happen?".
     for f in &manifest.functions {
-        let fn_id = f.get("id").and_then(|v| v.as_str()).unwrap_or("<unnamed>");
-        let mut sources: Vec<(&str, &str)> = Vec::new();
-        if let Some(k) = f.get("key_expr").and_then(|v| v.as_str()) {
-            sources.push(("key_expr", k));
-        }
-        for t in f
-            .get("triggers")
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-        {
-            if let Some(e) = t.get("expr").and_then(|v| v.as_str()) {
-                sources.push(("trigger expr", e));
-            }
-        }
-        for c in f
-            .get("cancel_on")
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-        {
-            if let Some(e) = c.get("expr").and_then(|v| v.as_str()) {
-                sources.push(("cancel_on expr", e));
-            }
-        }
-        for (what, src) in sources {
+        for (what, src) in f.cel_sources() {
             if let Err(e) = state.expr.compile(src) {
                 return Err(Problem::bad_request(
                     "bad_expression",
-                    format!("function '{fn_id}': {what} `{src}` did not compile: {e}"),
+                    format!("function '{}': {what} `{src}` did not compile: {e}", f.id),
                 ));
             }
         }
@@ -247,10 +175,10 @@ pub async fn register(
         // This one is the more expensive to get wrong: a predicate that does not
         // compile is at least logged at the first event, whereas an unschedulable
         // cron trigger produces no event at all to log against.
-        if let Err(e) = cron_registrations(&principal.namespace, fn_id, f) {
+        if let Err(e) = cron_registrations(&principal.namespace, f) {
             return Err(Problem::bad_request(
                 "bad_cron",
-                format!("function '{fn_id}': {e}"),
+                format!("function '{}': {e}", f.id),
             ));
         }
     }
@@ -310,11 +238,11 @@ pub async fn register(
     let mut ids: Vec<String> = Vec::new();
     let mut cron_count = 0usize;
     for f in &manifest.functions {
-        let Some(fn_id) = f.get("id").and_then(|v| v.as_str()) else {
-            return Err(Problem::bad_request("bad_function", "a function has no id"));
-        };
-        let version = f.get("version").and_then(|v| v.as_str()).unwrap_or("1");
+        let fn_id = f.id.as_str();
+        let version = f.version.as_deref().unwrap_or("1");
         ids.push(fn_id.to_string());
+
+        let config = serde_json::to_value(f).map_err(|e| Problem::internal(e.to_string()))?;
 
         sqlx::query(
             r#"INSERT INTO functions (id, ns, app_binding_id, fn_id, version, config)
@@ -327,7 +255,7 @@ pub async fn register(
         .bind(binding)
         .bind(fn_id)
         .bind(version)
-        .bind(f)
+        .bind(&config)
         .execute(&mut *tx)
         .await
         .map_err(|e| Problem::internal(e.to_string()))?;
@@ -336,7 +264,7 @@ pub async fn register(
         // and then registering its schedules leaves two silent ways to be wrong
         // if the process dies between: a cron function that never fires, or
         // schedules firing for a function no app is bound to.
-        let schedules = cron_registrations(&principal.namespace, fn_id, f)
+        let schedules = cron_registrations(&principal.namespace, f)
             .map_err(|e| Problem::bad_request("bad_cron", format!("function '{fn_id}': {e}")))?;
         let idx: Vec<i32> = schedules.iter().map(|s| s.trigger_idx).collect();
         if schedules.is_empty() {
@@ -490,7 +418,7 @@ mod tests {
         // update. An SDK that omits it must not be unable to register.
         let m: AppManifest = serde_json::from_value(serde_json::json!({
             "protocol": "1", "app_id": "billing", "url": "https://x/",
-            "functions": [{ "id": "f" }]
+            "functions": [{ "id": "f", "triggers": [{ "type": "invoke" }] }]
         }))
         .unwrap();
         assert!(m.checksum.is_none());

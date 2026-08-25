@@ -15,7 +15,7 @@ being a contract ([ADR-024](../docs/adr/024-language-trees.md)).
 |---|---|
 | `PROTOCOL.md` | Normative specification |
 | `schemas/` | JSON Schema (2020-12) for every message |
-| `examples/` | Valid example payloads, used as fixtures |
+| `examples/` | Valid example payloads. `validate.py`, `stepd-proto` and `@stepd/protocol` all assert against these files |
 | `validate.py` | Validates examples and negative cases against the schemas |
 | `rust/` | `stepd-proto` — the wire contract as a Rust crate. Its own workspace, depending on nothing; see [`rust/README.md`](rust/README.md) |
 | `typescript/` | `@stepd/protocol` — the same contract in TypeScript; see [`typescript/README.md`](typescript/README.md) |

@@ -31,14 +31,14 @@ describe('decodeAttempt', () => {
     expect(a.run.cancelling).toBe(false);
   });
 
-  it('accepts a string fence, which is what the schema specifies', () => {
-    // The schema and the crate disagree; an SDK that took either side literally
-    // would fail against the other, and which is the defect is not a decoder's
-    // business to decide.
-    expect(ok({ ...base, fence: '7' }).fence).toBe(7);
+  it('rejects a string fence: the wire is an integer', () => {
+    expect(decodeAttempt({ ...base, fence: '7' })).toEqual({
+      ok: false,
+      error: { kind: 'bad_field', field: 'fence', why: expect.any(String) },
+    });
   });
 
-  it('rejects a fence that is neither', () => {
+  it('rejects a fence that is not an integer', () => {
     const r = decodeAttempt({ ...base, fence: 'seven' });
     expect(r).toEqual({
       ok: false,
@@ -61,9 +61,12 @@ describe('decodeAttempt', () => {
     });
   });
 
-  it('defaults lineage_id to the run id, which is what it is before a chain', () => {
+  it('names a missing lineage_id rather than guessing', () => {
     const { lineage_id: _drop, ...run } = base.run;
-    expect(ok({ ...base, run }).run.lineage_id).toBe(base.run.id);
+    expect(decodeAttempt({ ...base, run })).toEqual({
+      ok: false,
+      error: { kind: 'missing', field: 'run.lineage_id' },
+    });
   });
 
   it('ignores unknown fields, per §11', () => {
@@ -78,5 +81,28 @@ describe('decodeAttempt', () => {
 
   it('carries state_truncated through, because ignoring it re-executes steps', () => {
     expect(ok({ ...base, state_truncated: true }).state_truncated).toBe(true);
+  });
+
+  it('keeps the CloudEvents extension names on events, not the Rust field names', () => {
+    // Ingest reads `stepdkey`. A TS Event that used `key` would schema-validate
+    // (additionalProperties) and the engine would ignore the field (§11).
+    const a = ok({
+      ...base,
+      events: [
+        {
+          specversion: '1.0',
+          id: 'evt_01',
+          source: '/shop/checkout',
+          type: 'order.created',
+          data: { order_id: 4711 },
+          stepdkey: 'order:4711',
+          stepdidempotency: '4711',
+        },
+      ],
+    });
+    expect(a.events[0]?.stepdkey).toBe('order:4711');
+    expect(a.events[0]?.stepdidempotency).toBe('4711');
+    expect('key' in (a.events[0] ?? {})).toBe(false);
+    expect('idempotency' in (a.events[0] ?? {})).toBe(false);
   });
 });
