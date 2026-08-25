@@ -836,6 +836,32 @@ executes rather than each time a step is recorded.
 **`POST {app_url}/_conformance/reset`** — clears every effect log. A runner calls
 this once before the battery so that a rerun does not inherit the previous one.
 
+**`POST {app_url}/_conformance/configure`** — REQUIRED of an app declaring
+`blobs` or `truncation`, OPTIONAL otherwise. The runner calls it once, after its
+own API is serving and before any case runs:
+
+```jsonc
+{ "api_base": "http://127.0.0.1:54321", "token": "…" }        // operator role
+```
+
+Any 2xx acknowledges it. The app keeps both for the run and uses them to call
+back into the server: `POST {api_base}/v1/blobs:reserve` for the two-phase upload
+(§8.3.2), and `GET {api_base}/v1/runs/{id}/steps` to page a truncated journal
+(§8.6). Both are `Authorization: Bearer {token}`.
+
+This endpoint exists because **there is no earlier moment**. Whoever launches the
+app cannot supply these: a runner binds its API to an ephemeral port and mints
+the token itself, so neither value exists until the app under test is already
+running and has had its manifest read. An app that could not be told them could
+not implement two of the nineteen suites, whatever its SDK did — which for a
+year meant those suites were reachable only by an app the runner started
+in-process, and therefore only by one written in the runner's own language.
+
+A runner MUST fail the whole run, naming configuration as the cause, if the call
+does not succeed. Letting it fail quietly makes `blobs` report a protocol
+divergence when the real fault is a wrong URL, and an SDK author would go looking
+in their blob client.
+
 **Hazards prevented by construction.** A manifest MAY also carry:
 
 ```jsonc

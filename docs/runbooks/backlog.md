@@ -133,7 +133,7 @@ within the hour.
 Above **100 000** unclaimed queue rows in a namespace, `POST /v1/events` stops
 accepting and returns `429` with `Retry-After: 5` and a `backpressure` problem
 code. The threshold is `BACKPRESSURE_THRESHOLD` in
-`rust/crates/stepd-server/src/ingest.rs` — a compile-time constant, not a row in
+`engine/rust/crates/stepd-server/src/ingest.rs` — a compile-time constant, not a row in
 `engine_limits`, so it cannot be raised during an incident.
 
 This is deliberate and you should not try to defeat it. Accepting work the system

@@ -95,18 +95,18 @@ point for everything that resolves a wait.**
 
 ## Verification
 
-* `rust/migrations/0003_signal_race.sql` — the fix and the finding that motivated it, in the
+* `engine/rust/migrations/0003_signal_race.sql` — the fix and the finding that motivated it, in the
   header comment and in `COMMENT ON FUNCTION deliver_to_inbox`.
-* `rust/tests/sql/test_invariants.sql` — checks 1 and 2 assert the lock is present and first
+* `engine/rust/tests/sql/test_invariants.sql` — checks 1 and 2 assert the lock is present and first
   in `deliver_to_inbox` and present in `commit_ops`; check 3 forbids advisory locks; check 5
   asserts the sender-dedupe index; check 11 asserts signals are relayed and that `commit_ops`
   never calls `deliver_to_inbox` while holding its own run lock; check 14 asserts inbox
   overflow bumps a counter.
-* `rust/tests/sql/test_engine.sql` — the `R1: early signal` block asserts the wait resolves
+* `engine/rust/tests/sql/test_engine.sql` — the `R1: early signal` block asserts the wait resolves
   immediately from the inbox, the run never suspends, no wait row is parked and the entry is
   consumed exactly once; `R1: late signal`, `R1: FIFO + one entry per wait` and
   `R1: sender dedupe` cover the remaining consumption rules.
-* `rust/tests/sql/test_engine_ops.sql` — the `signal` block asserts a signal to a run already
+* `engine/rust/tests/sql/test_engine_ops.sql` — the `signal` block asserts a signal to a run already
   parked on a matching wait wakes it (the defect migration 0006 replaced), and that a second
   `drain_signals` leaves exactly one inbox entry.
 * `reference/force_race.sh` and `reference/prove_fix.sh` — the forced interleaving, and the

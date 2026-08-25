@@ -86,7 +86,7 @@ as their **first** statement, and that explicit pairing is what makes this state
 unreachable. Rows here mean the schema was altered: run `stepd doctor`, read the
 `invariants` check, `stepd migrate`, and only then touch the run — unsticking one
 run leaves the race open and it will eat the next signal too. This is what
-`rust/tests/sql/test_invariants.sql` and simulation property P3 exist to prevent.
+`engine/rust/tests/sql/test_invariants.sql` and simulation property P3 exist to prevent.
 
 Signals from other runs are not delivered inline; they go to `signal_outbox` and
 are drained by the housekeeping loop, because inline delivery would take a second

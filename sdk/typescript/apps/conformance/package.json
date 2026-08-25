@@ -1,0 +1,24 @@
+{
+  "name": "@stepd/conformance-app",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The protocol §12.2 battery, served by the TypeScript SDK. Never published, never a production route.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc",
+    "start": "node --experimental-strip-types src/main.ts",
+    "test": "echo 'SKIPPED: this app is exercised by `stepd conformance`, not by vitest' && exit 0",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@stepd/protocol": "link:../../../../spec/typescript",
+    "@stepd/sdk": "workspace:*",
+    "@stepd/sdk-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.1",
+    "typescript": "^5.7.3"
+  }
+}

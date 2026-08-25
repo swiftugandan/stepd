@@ -19,12 +19,32 @@ memoisation, plus Restate-style keyed single-writer ordering, on Postgres.
 
 ## Layout
 
+Role at the top, language underneath.
+
 ```
-spec/        Wire protocol, JSON Schemas, validator
-rust/        The implementation: eleven crates, migrations, SQL test suites
-docs/        BRD, PRD, gap register, SDK design, ADRs, runbooks
-reference/   Python reference implementation — kept as an independent model
+spec/           The protocol: PROTOCOL.md, JSON Schemas, validator, fixtures
+  rust/           stepd-proto — the wire contract as a crate
+  typescript/     @stepd/protocol — the same contract in TypeScript
+sdk/            What a workflow author imports
+  rust/           stepd-sdk, stepd-sdk-core
+  typescript/     @stepd/sdk-core, @stepd/sdk, and the conformance app
+engine/         The server: ingest, storage, dispatch, console, CLI
+  rust/           eight crates, migrations, SQL test suites
+docs/           BRD, PRD, gap register, SDK design, ADRs, runbooks
+reference/      Python reference implementation — kept as an independent model
 ```
+
+Three Cargo workspaces, not one. `spec/rust` depends on nothing;
+`sdk/rust` depends on `spec/rust` and stops there; `engine/rust` depends on both.
+That last edge runs in the direction it reads: the engine implements the
+protocol, and consumes the SDK in exactly two places — the conformance
+battery's bundled reference app, and the server's end-to-end test, which is a
+dev-dependency.
+
+The split is what makes "a workflow author's process contains no engine" a
+checkable claim rather than a diagram. `cd sdk/rust && cargo build` succeeds
+with only `spec/rust` beside it, and CI greps the SDK's dependency tree for
+engine crates ([ADR-024](docs/adr/024-language-trees.md)).
 
 ## Status
 
@@ -32,13 +52,16 @@ reference/   Python reference implementation — kept as an independent model
 |---|---|---|
 | Protocol spec (rev 1.2) | Complete | 54 schema cases — `spec/validate.py` |
 | Postgres schema + engine SQL | Complete | 166 behavioural + 27 structural assertions |
-| `stepd-proto` | Complete | 36 tests |
+| `stepd-proto` | Complete | 36 tests, plus the cross-language fixtures |
+| `@stepd/protocol` | Complete | 103 tests; agrees with `stepd-proto` on 20 committed vectors |
+| `@stepd/sdk-core` | Complete | 76 tests — the replay machinery |
+| `@stepd/sdk` | Complete | 64 tests, including the in-process workflow harness; the TypeScript app reaches **level 2**, 28/28 cases |
 | `stepd-core` | Complete | 72 tests, in-memory fakes for every interface |
 | `stepd-store-postgres` | Complete | 16 unit + 25 live + the simulation harness |
 | `stepd-expr-cel` | Complete (documented subset) | 16 tests |
 | `stepd-transport-http` | Complete | 10 tests |
 | `stepd-sdk-core` | Complete | 32 tests — the R1 machinery |
-| `stepd-sdk` | Complete | 30 tests, including the workflow test harness |
+| `stepd-sdk` | Complete | 31 tests, including the workflow test harness and §8.6 journal paging |
 | `stepd-server` | Complete | 42 unit + 19 end-to-end |
 | `stepd-blobs-s3` | Complete | 8 offline + 6 live; the live ones need `STEPD_TEST_S3_*` |
 | `stepd-cli` | Complete | `serve` · `migrate` · `doctor` · `dev` · `token` · `run` · `limits` · `conformance` |
@@ -46,11 +69,11 @@ reference/   Python reference implementation — kept as an independent model
 | Cancellation compensation | Complete | migration 010; conformance `cancel` |
 | Managed blobs | Complete — filesystem (relay) and S3 (presigned) | two-phase upload, `Range`, dedupe, reference tracking; the S3 suites need `STEPD_TEST_S3_*` and no CI lane sets it ([#25](https://github.com/swiftugandan/stepd/issues/25)) |
 | Subject erasure | **Schema only** | [#1](https://github.com/swiftugandan/stepd/issues/1) |
-| Conformance suite | Complete | 19 suites, 28 cases; the reference app reaches **level 2** |
+| Conformance suite | Complete | 19 suites, 28 cases; the Rust reference app and the TypeScript app both reach **level 2** |
 
 **A five-step workflow runs from an ingested event to a completed run**, through
 the real dispatcher, a real SDK app on a real socket, over signed HTTP, against
-PostgreSQL 16 — `rust/crates/stepd-server/tests/end_to_end.rs`.
+PostgreSQL 16 — `engine/rust/crates/stepd-server/tests/end_to_end.rs`.
 
 ## Known gaps
 
@@ -90,7 +113,7 @@ createdb -p 5433 -U postgres stepd_sql
 createdb -p 5433 -U postgres stepd_rust
 
 # ---- the engine SQL: behaviour and structural invariants
-cd rust
+cd engine/rust
 SQLDB="postgres://postgres@127.0.0.1:5433/stepd_sql"
 for f in migrations/*.sql; do psql "$SQLDB" -v ON_ERROR_STOP=1 -q -f "$f"; done
 psql "$SQLDB" -v ON_ERROR_STOP=1 -q \
@@ -114,8 +137,17 @@ cd ../reference && python3 simulation.py 5000 && python3 coverage_check.py 400
 # Against your own SDK, once it serves the §12.1 endpoints:
 cargo run -p stepd-cli -- conformance \
   --app http://127.0.0.1:9944 \
+  --app-configure-url http://127.0.0.1:9944/_conformance/configure \
   --database-url postgres://postgres@127.0.0.1:5433/stepd_conf
 ```
+
+`--app-configure-url` is what the `blobs` and `truncation` suites need. Both
+require the app to call back into the server, and neither the server's address
+nor a token exists until after the app is already running — the runner binds an
+ephemeral port and mints the token itself. So it posts them to that URL once it
+is serving. Leave the flag off and those two suites are unreachable, which is
+what they were for every app this runner did not start in-process — that is to
+say, every app not written in Rust.
 
 The report says what it checked **and what it did not**. A suite the app did not
 declare and a suite this runner has not implemented are different lines, and
@@ -140,6 +172,30 @@ the specification. What it establishes is that every assertion is reachable, tha
 the §12.2 contract is implementable, and that an SDK change breaking a protocol
 guarantee fails a build.
 
+A second app now passes the same battery, in TypeScript:
+
+```bash
+cargo run -p stepd-cli -- conformance \
+  --app http://127.0.0.1:9944 \
+  --app-configure-url http://127.0.0.1:9944/_conformance/configure
+```
+
+**28/28 cases, level 2** — and CI runs it on every push, so the claim keeps being
+produced rather than remembered. Be precise about what it adds, though: that SDK
+is a deliberate port of the Rust one, written by reading it. Two implementations
+sharing an author can share a misreading exactly the way the battery and the Rust
+SDK can. It shows the §12.2 contract is implementable twice, in two languages,
+against one server — not that the specification is sufficient on its own. The
+evidence for *that* is an implementation written from `spec/PROTOCOL.md` alone,
+and it does not exist ([#6](https://github.com/swiftugandan/stepd/issues/6)).
+
+What it did surface is concrete: a defect none of that SDK's 76 unit tests found.
+A `wait_event` that timed out was replayed as an error rather than the `null` a
+handler branches on, so "nobody approved in seven days" failed the run instead of
+taking the other branch. The unit test that should have caught it recorded the
+convenient status rather than the one the engine actually writes — which is the
+argument for a battery driven by a real server in the first place.
+
 Without `STEPD_TEST_DATABASE_URL` the database-backed tests **skip loudly**. A
 database test that silently passes when it did not run is worse than no test,
 because the green tick is then a lie about the thing most likely to break.
@@ -154,7 +210,7 @@ because the green tick is then a lie about the thing most likely to break.
 ### Running the server
 
 ```bash
-cd rust
+cd engine/rust
 cargo run -p stepd-cli -- dev            # migrations, a namespace, a token, a console
 cargo run -p stepd-cli -- doctor         # thirteen checks; non-zero exit on anything critical
 ```
@@ -312,13 +368,14 @@ and skipped counts, and — if the sweep gave up on a schedule — why.
 | | |
 |---|---|
 | `spec/PROTOCOL.md` | The wire protocol. The thing a third party implements against — §12 now says what they must expose for the battery to run. |
-| `docs/adr/` | Twenty-three ADRs. Start with 011, 012 and 019 — the silent-corruption ones. ADR-016 records what building cron taught about ADR-016; 021 and 022 what the conformance suite found. |
+| `docs/adr/` | Twenty-five ADRs. Start with 011, 012 and 019 — the silent-corruption ones; 024 is why the tree is laid out as it is, and 025 where the TypeScript SDK deliberately differs from the Rust one. ADR-016 records what building cron taught about ADR-016; 021 and 022 what the conformance suite found. |
 | `docs/runbooks/restore-hazard.md` | **Read before you need it.** A point-in-time restore re-executes side effects — and re-fires cron occurrences, which is section 3a. |
 | `docs/runbooks/` | Stuck runs, backlog, poison pills, upgrades. |
 | `docs/RECONCILIATION.md` | What was wrong with the archived tree, what was done, and §7 — the findings worth carrying forward. |
 | `docs/GAPS.md` | The gap register, with a resolution against each gap. A snapshot; the [issue tracker](https://github.com/swiftugandan/stepd/issues) is the live list. |
 | `docs/blob-backends.md` | Which S3-compatible servers were observed to enforce a signed upload checksum, and what each one's rejection actually looked like. Read before choosing a store for `STEPD_BLOB_BACKEND=s3`. |
 | `docs/SDK-DESIGN-rust.md` | The two mechanisms that carry all the SDK's risk. |
+| `docs/SDK-DESIGN-typescript.md` | The same ground for TypeScript, and what replaces Rust's `!Send`. |
 
 ## Licence
 

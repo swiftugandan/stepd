@@ -72,6 +72,7 @@ and what remains genuinely open. Severity is the cost of discovering it late:
 | # | Gap | Sev | Resolution | Where |
 |---|---|---|---|---|
 | E1 | **No way to unit-test a workflow** | S4 | Test framework in the SDK: in-process mock server, op-sequence assertions, injected results/failures/events, virtual clock, "did not re-execute" assertions. Treated as adoption-critical, not a nicety. | F-DX-1 |
+| E1b | **Only one language could host workflow code** | S4 | A TypeScript SDK now reaches conformance **level 2**, 28/28 cases, in a CI lane on every push (`sdk/typescript`, [ADR-024](adr/024-language-trees.md)). **Partly open:** it is a port of the Rust SDK, written by reading it, so it does not test whether `spec/PROTOCOL.md` is sufficient on its own — two implementations sharing an author can share a misreading. That still needs an SDK written from the spec alone ([#6](https://github.com/swiftugandan/stepd/issues/6)). Driving it did surface one real defect the SDK's own unit tests missed, and one blocker in the runner: `stepd conformance` could not configure an app it had not started, so `blobs` and `truncation` were unreachable for every non-Rust app. | #6 |
 | E2 | Push model breaks laptop development behind NAT | S4 | `stepd dev --tunnel`; purely local development needs no tunnel. | F-DX-3 |
 | E3 | "Why did my step re-run?" has no answer in the UI | S4 | Orphaned-hash diagnostics surfaced per run with previous/current ids; replay debugger reports first divergence. | F-DX-2, F-DX-4 |
 | E4 | Hazards only discoverable in production | S4 | `stepd lint`: duplicate ids in a parallel group, side effects outside `ctx.run`, attempt timeout shorter than step timeout, unbounded loops without `continue_as_new`. | F-DX-6 |
@@ -113,16 +114,16 @@ superseded the prototype, the row says so.
 |---|---|---|
 | Dispatch loop (claim → deliver → commit, load protection) | **Implemented and tested end to end** (`reference/dispatcher.py`, 19 assertions, full workflow completes) | M1 |
 | OpenAPI 3.1 management/read API | **Implemented and tested** (`reference/api.py`, 30 assertions, 11 endpoints, `reference/openapi.json`); adversarial namespace-isolation tests included | M1 |
-| Postgres DDL + migrations | **Written, applied and tested against live PostgreSQL 16** (`reference/`, and since superseded by `rust/migrations/`): 25 behavioural + 6 structural assertions, 12-worker concurrency stress, 120 randomised signal races, forced-interleaving test | M1 |
+| Postgres DDL + migrations | **Written, applied and tested against live PostgreSQL 16** (`reference/`, and since superseded by `engine/rust/migrations/`): 25 behavioural + 6 structural assertions, 12-worker concurrency stress, 120 randomised signal races, forced-interleaving test | M1 |
 | Rust SDK design doc (short-circuit control flow — the subtlest code in the project) | **Written, and the SDK built from it**: `docs/SDK-DESIGN-rust.md` and `docs/sdk-prototype/` (property and adversarial tests, an `eager_claim` example), then `stepd-sdk-core` (32 tests) and `stepd-sdk` (30) | M1 |
-| Simulation harness design | **Built**, twice: `reference/simulation.py` against the model and `rust/crates/stepd-store-postgres/tests/simulation.rs` (5 tests) against the real engine; `reference/coverage_check.py` reports never-exercised paths | M0.5 |
+| Simulation harness design | **Built**, twice: `reference/simulation.py` against the model and `engine/rust/crates/stepd-store-postgres/tests/simulation.rs` (5 tests) against the real engine; `reference/coverage_check.py` reports never-exercised paths | M0.5 |
 | Risk-zone ownership map (drives selective test execution) | Specified, not built | M0.5 |
 | Tiered CI configuration with enforced time budgets | **Tiers built, budgets not enforced.** `.github/workflows/ci.yml` has six lanes across tiers 1–4; three name a time budget (`≤10s`, `≤5min`, `≤30min`), one names a cadence (`nightly`), and two — `tier 1 · crate boundaries` and `tier 3 · through pgbouncer` — name neither. Nothing holds a lane to its budget: the `timeout-minutes` guards are 10/10/20/30/40/360, each far above the budget beside it, so they catch a hang and not a lane that has outgrown its tier. PRD §10.2's diff-driven selective execution is absent too — no lane carries a `paths:` filter | M0.5 |
-| ADRs 001–023 | **Written** — 23 files under `docs/adr/` | M0.5 |
-| Console IA and wireframes | **Built and tested** (`reference/console.html`, 17 assertions incl. content-safety audit and the operator flow; the shipped console is `rust/crates/stepd-server/assets/console.html`) | M3 |
+| ADRs 001–025 | **Written** — 25 files under `docs/adr/` | M0.5 |
+| Console IA and wireframes | **Built and tested** (`reference/console.html`, 17 assertions incl. content-safety audit and the operator flow; the shipped console is `engine/rust/crates/stepd-server/assets/console.html`) | M3 |
 | Threat model | Not started | M4 |
 | Operations runbooks (incl. restore hazard) | **Written**: `restore-hazard`, `stuck-run`, `backlog`, `poison-pill`, `upgrade` under `docs/runbooks/`. None has been rehearsed | M4 |
-| Benchmark harness | **Built for the reference implementation** (`reference/bench.py`, against the PRD's ≥1000 commits/s NFR). Nothing benchmarks the Rust engine — no `benches/` anywhere in `rust/` | M4 |
+| Benchmark harness | **Built for the reference implementation** (`reference/bench.py`, against the PRD's ≥1000 commits/s NFR). Nothing benchmarks the Rust engine — no `benches/` anywhere in `engine/rust/` | M4 |
 | Licence, CONTRIBUTING, SECURITY.md, CoC | Licence **applied** (Apache-2.0, `LICENSE` at the root, commit `0d01e75`). The other three do not exist | Public release |
 
 ## Remaining open questions

@@ -19,7 +19,7 @@ memoization, plus Restate-style keyed single-writer ordering, on Postgres.
 ## Layout
 
 ```
-rust/        Rust workspace — INCOMPLETE, see below
+engine/rust/        Rust workspace — INCOMPLETE, see below
 spec/        Wire protocol, JSON Schemas, validator — complete
 reference/   Python reference implementation — complete and tested end to end
 docs/        BRD, PRD, gap register, SDK design, SDK prototype
@@ -52,7 +52,7 @@ crates are absent.
 against PostgreSQL 16, drives a five-step workflow to completion, and is what
 the Rust port was derived from.
 
-`rust/migrations/` originally contained only 0001 and 0002. Migrations 0003 and
+`engine/rust/migrations/` originally contained only 0001 and 0002. Migrations 0003 and
 0004 carry critical fixes and have been copied in from `reference/`.
 
 ## The two fixes not to lose
@@ -121,7 +121,7 @@ cd rust && cargo test --workspace
 
 ## Next steps, in order
 
-1. Read `rust/crates/stepd-core` properly and reconcile against PRD §6.3. Its
+1. Read `engine/rust/crates/stepd-core` properly and reconcile against PRD §6.3. Its
    `testing.rs` in-memory fakes are a genuine improvement — they let the dispatch
    loop be tested with no database and no network at all.
 2. Write `stepd-sdk` from `docs/SDK-DESIGN-rust.md`; the eager-claim mechanism in

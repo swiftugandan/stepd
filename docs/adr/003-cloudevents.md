@@ -43,7 +43,7 @@ it would arrive as one opaque header and stop being addressable.
 
 `stepdkey` overriding `key_expr` is deliberate: a producer that already knows the
 business key should not have to encode it so that the consumer's CEL can
-rediscover it. `rust/crates/stepd-server/src/ingest.rs` prefers `event.key` and
+rediscover it. `engine/rust/crates/stepd-server/src/ingest.rs` prefers `event.key` and
 falls back to evaluating the function's expression.
 
 The engine never interprets `data`. Bulk content is a `$blob` or `$ref` payload
@@ -102,14 +102,14 @@ The engine never interprets `data`. Bulk content is a `$blob` or `$ref` payload
 
 ## Verification
 
-* `rust/crates/stepd-proto/src/types.rs` defines `Event` with
+* `spec/rust/crates/stepd-proto/src/types.rs` defines `Event` with
   `#[serde(rename = "type")]` on `event_type`, `#[serde(rename = "stepdkey")]` on
   `key` and `#[serde(rename = "stepdidempotency")]` on `idempotency`, and defaults
   `specversion` to `1.0`. Its test `event_uses_cloudevents_field_names` asserts the
   serialised form carries `specversion: "1.0"` and `type`, and explicitly asserts
   that no `event_type` field appears — a rename that silently reverted would
   otherwise produce an envelope no CloudEvents consumer recognises.
-* `rust/crates/stepd-server/src/ingest.rs` defines the wire-side `EventIn` and the
+* `engine/rust/crates/stepd-server/src/ingest.rs` defines the wire-side `EventIn` and the
   `From<EventIn> for stepd_proto::Event` conversion.
   `a_cloudevent_maps_onto_the_wire_type_without_losing_extensions` round-trips a
   full envelope and asserts both extensions survive, with the comment that losing
@@ -117,7 +117,7 @@ The engine never interprets `data`. Bulk content is a `$blob` or `$ref` payload
   `an_event_without_the_optional_fields_still_parses` pins the tolerant defaults.
 * The override rule is implemented in `start_matching_runs` in the same file, which
   takes `event.key` when present and calls `evaluate_key` otherwise.
-* `rust/crates/stepd-core/tests/engine.rs::idempotent_ingest_returns_the_same_event_id`
-  and `rust/crates/stepd-server/tests/end_to_end.rs::a_duplicate_event_does_not_start_a_second_run`
+* `engine/rust/crates/stepd-core/tests/engine.rs::idempotent_ingest_returns_the_same_event_id`
+  and `engine/rust/crates/stepd-server/tests/end_to_end.rs::a_duplicate_event_does_not_start_a_second_run`
   assert that the dedupe key does what the extension exists for, in-memory and
   against a real database respectively.

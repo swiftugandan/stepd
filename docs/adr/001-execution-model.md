@@ -38,7 +38,7 @@ the handler yields, the server commits and schedules the next attempt.
 
 **Identity is the step id, not the position (§6).** A step is
 `sha256(function_id ‖ 0x1F ‖ step_id ‖ 0x1F ‖ occurrence)[0..8]`, implemented in
-`rust/crates/stepd-proto/src/hash.rs`; occurrence is a per-`step_id` counter reset every
+`spec/rust/crates/stepd-proto/src/hash.rs`; occurrence is a per-`step_id` counter reset every
 attempt. Because identity is not positional, adding, removing or reordering steps around
 an in-flight one leaves its result addressable.
 
@@ -49,7 +49,7 @@ attempts and completed work re-executes with nothing erroring.
 
 **Keyed single-writer plus fencing.** At most one non-terminal run exists per
 `(ns, fn_id, key)`, enforced by the partial unique index `runs_singleton_key` in
-`rust/migrations/0001_initial.sql` rather than by application logic. Each attempt carries
+`engine/rust/migrations/0001_initial.sql` rather than by application logic. Each attempt carries
 a monotonic fence token; a response bearing a stale fence is discarded (§7.3).
 
 ## Consequences
@@ -100,14 +100,14 @@ a monotonic fence token; a response bearing a stale fence is discarded (§7.3).
 
 ## Verification
 
-* `rust/crates/stepd-core/tests/engine.rs` drives the real dispatch loop against in-memory
+* `engine/rust/crates/stepd-core/tests/engine.rs` drives the real dispatch loop against in-memory
   components: `workflow_runs_end_to_end_and_each_step_executes_once` asserts each
   side-effecting counter is exactly 1 across a multi-attempt run,
   `duplicate_commit_records_a_step_once` asserts first-write-wins,
   `stale_fence_response_is_discarded` asserts a superseded attempt writes nothing, and
   `keyed_runs_are_mutually_exclusive` asserts a second active run on the same key is
   refused and that the key frees on termination.
-* `rust/crates/stepd-sdk-core/src/tests.rs` covers the SDK half.
+* `sdk/rust/crates/stepd-sdk-core/src/tests.rs` covers the SDK half.
   `eager_claiming_makes_poll_order_irrelevant` builds futures in program order `a, b, a`,
   polls them in reverse, and asserts the hashes are unchanged;
   `naive_counter_under_reordering_is_demonstrably_broken` is its control, showing the lazy
@@ -120,8 +120,8 @@ a monotonic fence token; a response bearing a stale fence is discarded (§7.3).
   outcome and the execution count are unchanged. `stepd-proto/src/hash.rs` holds the hash's
   own tests, including `separator_prevents_component_confusion` — without the `0x1F`
   separator, `("a","bc")` and `("ab","c")` hash identical bytes.
-* `rust/crates/stepd-store-postgres/tests/live.rs` repeats the properties against a real
+* `engine/rust/crates/stepd-store-postgres/tests/live.rs` repeats the properties against a real
   database: `a_five_step_workflow_runs_to_completion`,
   `only_one_run_per_key_is_active_at_a_time`, `a_superseded_attempt_cannot_commit`.
-  `rust/tests/sql/test_invariants.sql` fails the build if `runs_singleton_key` disappears
+  `engine/rust/tests/sql/test_invariants.sql` fails the build if `runs_singleton_key` disappears
   or if `commit_ops` stops checking the fence under the run row lock.

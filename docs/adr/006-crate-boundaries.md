@@ -28,7 +28,7 @@ rewrite that nobody proposes because the estimate is unbelievable.
 
 ## Decision
 
-Nine crates, with dependency arrows pointing inward (`rust/Cargo.toml`):
+Nine crates, with dependency arrows pointing inward (`engine/rust/Cargo.toml`):
 
 | Crate | Depends on | Role |
 |---|---|---|
@@ -79,7 +79,7 @@ because two backends spelling `stale_fence` differently is a silent divergence.
 
 ### What we accept
 * The CI enforcement described in PRD §6.1 — `cargo-deny` bans plus a dependency-graph
-  assertion — **does not yet exist**: `rust/.github/workflows/` is empty. The rule currently
+  assertion — **does not yet exist**: `engine/rust/.github/workflows/` is empty. The rule currently
   holds by construction of the manifests and is checkable by hand with `cargo tree`. Until
   the lint lands, the guarantee is a convention, and conventions decay.
 * The shipped graph differs from the PRD §6.1 table in two places, and the tree is right:
@@ -102,14 +102,14 @@ because two backends spelling `stale_fence` differently is a silent divergence.
 
 ## Verification
 
-* `rust/Cargo.toml` lists the nine members; `rust/crates/stepd-proto/Cargo.toml` has no
+* `engine/rust/Cargo.toml` lists the nine members; `spec/rust/crates/stepd-proto/Cargo.toml` has no
   `tokio`, `reqwest`, `sqlx` or `async-trait` entry, and `grep -rn "tokio\|reqwest\|sqlx"
-  rust/crates/stepd-proto/src/` matches only the doc comment asserting their absence.
-* `rust/crates/stepd-core/Cargo.toml` names `stepd-proto` and nothing else from the
+  spec/rust/crates/stepd-proto/src/` matches only the doc comment asserting their absence.
+* `engine/rust/crates/stepd-core/Cargo.toml` names `stepd-proto` and nothing else from the
   workspace. `stepd-store-postgres`, `stepd-transport-http` and `stepd-expr-cel` each name
   `stepd-core`, confirming the arrows point inward.
-* `rust/crates/stepd-core/src/lib.rs` states the rule in its module docs; `traits.rs`
+* `engine/rust/crates/stepd-core/src/lib.rs` states the rule in its module docs; `traits.rs`
   restates it above the trait definitions.
-* `rust/crates/stepd-core/tests/engine.rs` runs the real dispatch loop against
+* `engine/rust/crates/stepd-core/tests/engine.rs` runs the real dispatch loop against
   `stepd-core/src/testing.rs` doubles — the payoff for defining the traits, and the evidence
   that the engine has no hidden backend requirement.

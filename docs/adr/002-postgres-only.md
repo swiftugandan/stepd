@@ -28,7 +28,7 @@ bypassing `deliver_to_inbox` and never waking a parked run, `wait_event` accepti
 a `timeout` it never scheduled, and a cascade that orphaned descendants if it
 crashed mid-way — and none of the structural invariant tests applied to the second
 implementation, because they assert properties of the SQL functions. The reasoning
-is written up in the module header of `rust/crates/stepd-store-postgres/src/lib.rs`.
+is written up in the module header of `engine/rust/crates/stepd-store-postgres/src/lib.rs`.
 
 A second *backend* is that same mistake with a larger surface.
 
@@ -40,10 +40,10 @@ in `stepd-core`, and `sqlx` is compiled with the `postgres` feature only. There 
 no storage abstraction that a second engine could be slotted into, and no
 lowest-common-denominator SQL.
 
-Correctness-critical logic lives in SQL functions under `rust/migrations/`, not in
+Correctness-critical logic lives in SQL functions under `engine/rust/migrations/`, not in
 Rust. `stepd-store-postgres` marshals to JSON, calls the function and maps the
 result. One reviewable correctness centre, guarded by
-`rust/tests/sql/test_invariants.sql`, which fails the build if a future edit
+`engine/rust/tests/sql/test_invariants.sql`, which fails the build if a future edit
 removes a property no behavioural test would notice going missing.
 
 ## Consequences
@@ -83,7 +83,7 @@ removes a property no behavioural test would notice going missing.
 * Tests that skip when the database is absent are tests that can silently stop
   running. The skip prints to stderr; nothing enforces that CI sets the variable.
 * **`stepd dev` does not yet do what §6.4 promises.** The PRD says it "provisions
-  Postgres transparently"; as built, `dev` in `rust/crates/stepd-cli/src/main.rs`
+  Postgres transparently"; as built, `dev` in `engine/rust/crates/stepd-cli/src/main.rs`
   takes a connection URL like every other command and only applies migrations,
   creates a namespace, mints a token and relaxes the egress policy. The parity
   argument holds either way — it is the same engine — but the developer ergonomics
@@ -102,22 +102,22 @@ removes a property no behavioural test would notice going missing.
 
 ## Verification
 
-* `rust/Cargo.toml` declares `sqlx` with features `runtime-tokio, postgres, json,
+* `engine/rust/Cargo.toml` declares `sqlx` with features `runtime-tokio, postgres, json,
   uuid, chrono, migrate` — no `sqlite`, so a second backend cannot be added without
   the dependency change being visible in review.
-* `rust/crates/stepd-store-postgres/src/lib.rs` is the only implementation of
+* `engine/rust/crates/stepd-store-postgres/src/lib.rs` is the only implementation of
   `StateStore`, `Queue`, `TimerStore`, `EventLog` and `Housekeeping`; its module
   header records why the SQL stayed in SQL.
-* `rust/tests/sql/test_invariants.sql` asserts the engine-specific properties
+* `engine/rust/tests/sql/test_invariants.sql` asserts the engine-specific properties
   directly: no advisory locks anywhere (pooler safety), `deliver_to_inbox` taking
   the run row lock as its *first* statement, `commit_ops` checking the fence under
   that lock, exactly one `commit_ops` overload, and the `runs_singleton_key`
   exclusivity index being present.
-* `rust/crates/stepd-cli/src/doctor.rs` checks conditions only a Postgres
+* `engine/rust/crates/stepd-cli/src/doctor.rs` checks conditions only a Postgres
   deployment has: `pooler` (detects pgbouncer and its mode), `partitions` (next
   month's event partition exists), `clock` (skew against database time),
   `invariants`, `leases`.
-* `rust/crates/stepd-store-postgres/tests/live.rs` and `tests/simulation.rs` run the
+* `engine/rust/crates/stepd-store-postgres/tests/live.rs` and `tests/simulation.rs` run the
   behavioural and property suites against a real database, both gated on
   `STEPD_TEST_DATABASE_URL`; `no_property_is_violated_across_the_seed_budget` is the
   simulation entry point.

@@ -101,20 +101,20 @@ horizon, never about every byte the operator holds.
 **Not verified: there is no erasure implementation.** This ADR is `Proposed` and
 records a design plus its open questions. What exists is schema only:
 
-* `rust/migrations/0001_initial.sql` defines `subject_index`
+* `engine/rust/migrations/0001_initial.sql` defines `subject_index`
   `(ns, subject_key, entity_kind, entity_id)` and `erasures` `(id, ns,
   subject_key, requested_by, requested_at, state, progress_cursor,
   completed_at)`, plus `events.subject_key` and `runs.subject_key` with the
   partial indexes `events_subject` and `runs_subject`. Nothing references any of
-  them: `grep -rn subject_key --include=*.rs rust/` returns no matches at all.
-* **No API.** `rust/crates/stepd-server/src/api.rs::router()` registers thirteen
+  them: `grep -rn subject_key --include=*.rs engine/rust/` returns no matches at all.
+* **No API.** `engine/rust/crates/stepd-server/src/api.rs::router()` registers thirteen
   routes and none is the `DELETE /v1/namespaces/{ns}/subjects/{id}` of F-SEC-5.
   There is no erasure handler, no worker sweep in
-  `rust/crates/stepd-core/src/housekeeper.rs`, and no `erase` command in the
+  `engine/rust/crates/stepd-core/src/housekeeper.rs`, and no `erase` command in the
   audit path.
 * **No declaration either.** `subject_expr` appears in neither
   `spec/schemas/function-config.schema.json` nor
-  `rust/crates/stepd-sdk/src/function.rs`, so a function currently has no way to
+  `sdk/rust/crates/stepd-sdk/src/function.rs`, so a function currently has no way to
   say what identifies a subject in its payloads. The declaration side must be
   specified before the erasure side can be built.
 * Redaction (F-SEC-6) is likewise schema-only: `namespaces.redaction_cfg` exists

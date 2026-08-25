@@ -37,7 +37,7 @@ single argument in the project for deterministic simulation over review.
 rejected outright while a non-detached child is live.**
 
 Implemented in the `continue_as_new` branch of `commit_ops`
-(`rust/migrations/0006_engine_complete.sql`):
+(`engine/rust/migrations/0006_engine_complete.sql`):
 
 1. **Live-children check first.** Any non-detached child not in a terminal state fails the run
    with `continue_as_new_with_live_children` (non-retryable) before anything is written. No
@@ -104,11 +104,11 @@ reintroducing the hazard silently.
 
 ## Verification
 
-* `rust/migrations/0006_engine_complete.sql`, `continue_as_new` branch — the live-children
+* `engine/rust/migrations/0006_engine_complete.sql`, `continue_as_new` branch — the live-children
   check, with the comment naming its provenance: "Found by simulation property P8, not by
   review". Also the ordering comment explaining why the predecessor must reach a terminal state
   before the successor row is inserted.
-* `rust/tests/sql/test_engine_ops.sql`, `continue_as_new` blocks — the successor keeps the key,
+* `engine/rust/tests/sql/test_engine_ops.sql`, `continue_as_new` blocks — the successor keeps the key,
   `chain_position` advances to 1, `input` is carried, the successor's journal is empty, the
   successor is dispatchable, and **exactly one active run exists on the key throughout the
   transition** (never two, never zero). The second block invokes a tracked child and then
@@ -116,9 +116,9 @@ reintroducing the hazard silently.
   code is recorded on the run, and no successor exists in the lineage.
 * Same file, `fencing` block — a superseded attempt attempting `continue_as_new` returns
   `stale_fence` and creates no successor, so a lineage cannot fork from a replaced attempt.
-* `rust/crates/stepd-sdk-core/src/tests.rs` — `continue_as_new_always_halts`: there is no
+* `sdk/rust/crates/stepd-sdk-core/src/tests.rs` — `continue_as_new_always_halts`: there is no
   memoised path, because the successor is a different run.
-* `rust/migrations/0005_step_op_continue_as_new.sql` — the enum value is added in its own
+* `engine/rust/migrations/0005_step_op_continue_as_new.sql` — the enum value is added in its own
   `-- no-transaction` migration, because PostgreSQL will not let a new enum value be *used* in
   the transaction that adds it. Folding it into 0006 would fail on a fresh database and pass on
   an already-migrated one: a migration bug that only appears on the deployment that matters.

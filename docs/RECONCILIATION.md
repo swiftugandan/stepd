@@ -96,7 +96,7 @@ cascade is retried whole.
 plus structural invariant 13, which fails the build if it stops being one
 recursive statement.
 
-### 2.4 `rust/migrations/0002_engine.sql` was a botched concatenation
+### 2.4 `engine/rust/migrations/0002_engine.sql` was a botched concatenation
 
 The file contained 002, 003 and 004 spliced together — including a `COMMIT;`
 mid-file followed by another `BEGIN;` — *and* 0003 and 0004 also existed as

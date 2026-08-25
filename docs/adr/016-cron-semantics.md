@@ -100,8 +100,8 @@ Cron semantics are as specified in `spec/PROTOCOL.md` §3.1, normatively:
 
 ## Verification
 
-**Implemented and verified.** `rust/migrations/0009_cron.sql`,
-`rust/crates/stepd-core/src/cron.rs`, `rust/crates/stepd-store-postgres/src/cron.rs`.
+**Implemented and verified.** `engine/rust/migrations/0009_cron.sql`,
+`engine/rust/crates/stepd-core/src/cron.rs`, `engine/rust/crates/stepd-store-postgres/src/cron.rs`.
 
 The implementation is split in two, deliberately. `stepd-core::cron` is pure —
 parsing, next-occurrence computation, the catch-up decision, the sweep plan — and

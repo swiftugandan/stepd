@@ -1,0 +1,13 @@
+{
+  "name": "@stepd/typescript-sdk",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Workspace root for the stepd TypeScript SDK. Not published.",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  }
+}

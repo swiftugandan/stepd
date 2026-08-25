@@ -1,0 +1,192 @@
+# stepd — the TypeScript SDK
+
+What a workflow author imports. No engine, no database, no server.
+
+```
+packages/sdk-core/    the replay machinery — no I/O, no HTTP
+packages/sdk/         the builders, the manifest, the request handler, blobs, the harness
+apps/conformance/     the §12.2 battery app — never published, never a production route
+```
+
+| Entry point | |
+|---|---|
+| `@stepd/sdk` | `App`, `fn`, `Ctx`, `Blobs`, `createHandler` |
+| `@stepd/sdk/node` | `nodeListener(app)` for `http.createServer` |
+| `@stepd/sdk/testing` | `harness(handler)` — no database, no server, no HTTP |
+
+**`stepd conformance` reports this app CONFORMANT AT LEVEL 2** — all nineteen
+suites declared, 28 of 28 cases passing, including the two-phase blob upload and
+§8.6 journal paging. CI runs it on every push.
+
+What that adds is worth stating precisely: this SDK is a port of the Rust one,
+written by reading it, so the two can share a misreading of the specification the
+same way the battery and the Rust SDK can. It shows the §12.2 contract is
+implementable twice against one server — not that the spec is sufficient alone.
+That would need an implementation written from `spec/PROTOCOL.md` and nothing
+else ([#6](https://github.com/swiftugandan/stepd/issues/6)).
+
+The SDK's surface is `(Request) => Promise<Response>`, so the same handler runs
+under `node:http`, Bun, Deno, a Cloudflare Worker or a Next.js route. Framework
+adapters are not written yet; `apps/conformance/src/server.ts` has the `node:http`
+bridge in about forty lines, which is roughly what one will be.
+
+## Why this is a separate workspace
+
+The same reason [`sdk/rust`](../rust) is: so that "a workflow author's process
+contains no engine" fails a build rather than appearing in a diagram
+([ADR-024](../../docs/adr/024-language-trees.md)). The whole dependency graph is:
+
+```
+  @stepd/sdk-core
+      └── @stepd/protocol        ../../spec/typescript
+```
+
+`@stepd/protocol` is a path dependency on `spec/typescript`, not a package here.
+It is the published wire contract, shared with the engine and every other SDK;
+owning it from one side would make it that side's type definitions.
+
+Build the protocol package first — `sdk-core` resolves it through `dist`:
+
+```bash
+(cd ../../spec/typescript && pnpm install && pnpm build)
+pnpm install && pnpm test
+```
+
+## The one rule
+
+**`ctx.step(id, fn)` claims its occurrence when it is *called*, not when the
+returned value is awaited.**
+
+Everything else follows. Claiming at `await` would tie occurrence to scheduler
+order rather than declaration order, so a completed step's hash would differ
+between attempts: the server holds a result the handler never asks for, the step
+re-executes, the payment is taken twice — and **nothing errors**
+([ADR-012](../../docs/adr/012-eager-occurrence-claiming.md)).
+
+Because the claim is already done, `Promise.all` over steps is safe.
+`ctx.parallel` adds a repeated-id check and one envelope instead of one round
+trip per member.
+
+`test/claiming.test.ts` demonstrates this rather than asserting it: one test
+awaits the same steps in opposite orders and shows the hashes are unchanged, and
+a second implements lazy claiming as a deliberate control and asserts that it
+*does* break. If the control ever passes, the first test is proving nothing.
+
+## What replaces Rust's `!Send`
+
+The Rust SDK makes `Ctx` `!Send`, so spawning a task that claims a step fails to
+compile. TypeScript has no equivalent, so the runtime guards here are not
+belt-and-braces — they are the only line of defence:
+
+| Guard | What it catches |
+|---|---|
+| Pass token / sealing | A claim after the pass ended: a timer, a floating promise, a `Ctx` that outlived its attempt |
+| No claiming inside a step body | A nested `ctx.step`, whose hash would depend on whether its parent was replayed from the memo. The Rust SDK permits this; refusing is deliberate |
+| No repeated id in one parallel group | A fan-out loop with no discriminator |
+| Swallowed-halt detection | `try { await ctx.step(..) } catch {}`, and `Promise.allSettled` over steps |
+
+That last one matters more here than in Rust. A step that has recorded its result
+throws to stop the pass so the server can commit it; `catch {}` and `allSettled`
+both absorb that, and the run would be committed as complete with the rest of the
+workflow never run. `allSettled` in particular is a reasonable thing to reach for
+rather than a mistake anyone would flag in review — it was found by writing a
+test that expected it to work.
+
+## Large payloads and large journals
+
+`Blobs` is the §8.3.2 two-phase client: reserve, upload straight to the store,
+return a reference. Bytes never cross the stepd server. Upload **inside a step** —
+that is what records the reference in the journal, and the journal reference is
+what keeps the bytes alive.
+
+```ts
+const receipt = await ctx.step('receipt', async () => {
+  const blob = await blobs.put(ctx.run.id, pdf, { contentType: 'application/pdf' });
+  return blob.toJSON();
+});
+```
+
+Reading is lazy and a `Blob` is a value, so replaying a run with forty
+blob-bearing steps decodes forty references and downloads nothing. Full reads
+verify the digest — a truncated transfer is the one corruption the server cannot
+see, because it never held the bytes. Range reads do not, because a range does
+not hash to the object's digest.
+
+`App.journalSource(base, token)` supplies the address for §8.6 paging. Without
+it, an attempt carrying `state_truncated` fails non-retryably naming the method,
+which is the only safe alternative: replaying against a partial journal
+re-executes every step the app could not see, the run still completes, and
+nothing errors.
+
+## Testing a workflow
+
+```ts
+import { harness } from '@stepd/sdk/testing';
+
+const t = harness(chargeAndShip);
+t.sendEvent('order.approved', true);          // BEFORE the wait
+expect(await t.runToCompletion()).toBe(true);
+t.assertStepExecutedOnce('charge');
+```
+
+No database, no server, no HTTP. Note what that proves: the event was delivered
+*before* the handler reached its `waitEvent`, and the run still resolved — §7.6's
+early-signal guarantee, in three lines.
+
+The harness drives the **same `runPass`** the real handler drives. One with its
+own replay logic would let a workflow pass here and fail in production for
+reasons the test could not see. It ships only *settled* steps into the memo, for
+the same reason: a harness that shipped pending rows would be more permissive
+than the engine, and a workflow could pass its tests and hang once deployed.
+
+`assertStepExecutedOnce` is the assertion to reach for. At-least-once execution
+is the contract, so "ran once" is a property of memoisation working rather than
+something a handler can arrange for itself.
+
+## Deliberate differences from the Rust SDK
+
+There are eight, and they are recorded with their reasons in
+[ADR-025](../../docs/adr/025-typescript-sdk-divergences.md). Two of them change
+what a workflow may do:
+
+**Step results are projected through JSON on first execution too.** Rust returns
+the original value the first time and the JSON projection on replay, so
+`ctx.step('t', () => new Date())` hands back a `Date` once and an ISO string ever
+after — code that works until the first retry, which is exactly when nobody is
+watching. One round trip per step buys identical behaviour on attempt one and
+attempt forty.
+
+**A step body may not create steps.** See the table above.
+
+[`docs/SDK-DESIGN-typescript.md`](../../docs/SDK-DESIGN-typescript.md) covers the
+design in full.
+
+## Running the tests
+
+No database, no server, no `STEPD_TEST_DATABASE_URL`:
+
+```bash
+pnpm test        # 140 tests: 76 in sdk-core, 64 in sdk
+pnpm typecheck
+pnpm build       # ESM, CJS and .d.ts
+```
+
+## Running the battery against it
+
+```bash
+(cd ../../spec/typescript && pnpm build) && pnpm build
+(cd apps/conformance && PORT=9944 node --experimental-strip-types src/main.ts &)
+
+cd ../../engine/rust
+cargo run -p stepd-cli -- \
+  --database-url postgres://postgres@127.0.0.1:5433/stepd_conf_ts \
+  conformance \
+  --app http://127.0.0.1:9944 \
+  --app-configure-url http://127.0.0.1:9944/_conformance/configure
+```
+
+`--app-configure-url` is how an app the runner did not start learns the server's
+address and a token. It is not needed at level 1 and is passed anyway, because
+the level-2 suites that need it are the next thing to land.
+
+CI runs exactly this, in `tier 2 · integration`.

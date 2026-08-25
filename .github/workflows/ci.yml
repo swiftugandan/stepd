@@ -41,18 +41,70 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust
+          workspaces: |
+            spec/rust
+            sdk/rust
+            engine/rust
       - name: format
-        run: cargo fmt --all --check
-        working-directory: rust
+        run: |
+          for w in spec/rust sdk/rust engine/rust; do
+            (cd "$w" && cargo fmt --all --check)
+          done
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-        working-directory: rust
+        run: |
+          for w in spec/rust sdk/rust engine/rust; do
+            (cd "$w" && cargo clippy --workspace --all-targets -- -D warnings)
+          done
       - name: unit tests
-        # No STEPD_TEST_DATABASE_URL: the database-backed tests skip loudly, and
-        # this lane is about the logic that needs nothing running.
-        run: cargo test --workspace --lib
-        working-directory: rust
+        # `spec/rust` and `sdk/rust` need nothing running, so their whole suites
+        # belong in this tier rather than tier 2 — a workflow author's feedback
+        # loop should not have to wait on a database they do not use.
+        #
+        # For the engine, still no STEPD_TEST_DATABASE_URL: the database-backed
+        # tests skip loudly, and this lane is about the logic that needs nothing
+        # running.
+        run: |
+          (cd spec/rust   && cargo test --workspace)
+          (cd sdk/rust    && cargo test --workspace)
+          (cd engine/rust && cargo test --workspace --lib)
+
+  # ---------------------------------------------------------------- tier 1
+  typescript:
+    name: "tier 1 · typescript (≤60s)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: "**/pnpm-lock.yaml"
+      # One loop, so adding `sdk/typescript` is one line rather than a job.
+      # These packages need no database and no server — that is the whole point
+      # of where they sit — so they belong in the tier that runs on every push
+      # and finishes in a minute.
+      - name: install, build, typecheck, test
+        # Build BEFORE typecheck, and not the other way round. `@stepd/sdk`
+        # resolves `@stepd/sdk-core` through its `dist`, so typechecking first
+        # fails on a module that has not been emitted yet — which is exactly what
+        # this lane caught on its first run, and what a local machine with a
+        # warm `dist` hides. `pnpm -r build` is topological, so within a
+        # workspace the order takes care of itself; across workspaces the loop
+        # order does, since `sdk` depends on `spec` and not the reverse.
+        run: |
+          for w in spec/typescript sdk/typescript; do
+            echo "::group::$w"
+            (cd "$w" \
+              && pnpm install --frozen-lockfile \
+              && pnpm build \
+              && pnpm typecheck \
+              && pnpm test)
+            echo "::endgroup::"
+          done
 
   # ---------------------------------------------------------------- boundaries
   boundaries:
@@ -64,7 +116,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust
+          workspaces: |
+            spec/rust
+            sdk/rust
+            engine/rust
       - name: stepd-proto has no runtime, no I/O, no database
         # The load-bearing constraint: it is what lets a third party build an
         # alternative server or SDK against the published spec without
@@ -74,7 +129,18 @@ jobs:
           cargo tree -p stepd-proto --edges normal --prefix none \
             | grep -Ei '^(tokio|sqlx|axum|reqwest|hyper) ' \
             && { echo "stepd-proto gained a runtime or I/O dependency"; exit 1; } || true
-        working-directory: rust
+        working-directory: spec/rust
+      - name: the SDK's dependency graph contains no engine
+        # `sdk/rust` is a separate workspace so this is checkable rather than
+        # aspirational. `cargo build` proves the workspace resolves with only
+        # `spec/rust` beside it; the grep names the crates it must never reach
+        # for, because a build succeeding says nothing about what it pulled in.
+        run: |
+          cargo build --workspace --locked
+          cargo tree --workspace --edges normal --prefix none \
+            | grep -E '^stepd-(core|store-postgres|server|transport-http|expr-cel|blobs-s3|conformance|cli) ' \
+            && { echo "the SDK gained a dependency on the engine"; exit 1; } || true
+        working-directory: sdk/rust
       - name: stepd-core names no concrete backend
         # The moment the engine reaches for sqlx directly, swapping a backing
         # service stops being a new crate and becomes a rewrite.
@@ -82,12 +148,17 @@ jobs:
           cargo tree -p stepd-core --edges normal --prefix none \
             | grep -Ei '^(sqlx|reqwest|axum) ' \
             && { echo "stepd-core gained a backend dependency"; exit 1; } || true
-        working-directory: rust
+        working-directory: engine/rust
       - name: install cargo-deny
         run: cargo install cargo-deny --locked
       - name: licences and advisories
-        run: cargo deny check
-        working-directory: rust
+        # One policy at the root, three workspaces checked against it. What this
+        # project redistributes is a project-wide decision; three copies would be
+        # three lists drifting apart.
+        run: |
+          for w in spec/rust sdk/rust engine/rust; do
+            (cd "$w" && cargo deny --config ../../deny.toml check)
+          done
 
   # ---------------------------------------------------------------- tier 2
   integration:
@@ -111,7 +182,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust
+          workspaces: |
+            spec/rust
+            sdk/rust
+            engine/rust
+      # For the TypeScript conformance step below.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: "**/pnpm-lock.yaml"
 
       - name: protocol schemas
         # In a virtualenv, and pinned. ubuntu-latest ships jsonschema 4.10 in
@@ -136,18 +219,45 @@ jobs:
         run: |
           psql "$STEPD_TEST_DATABASE_URL" -c 'CREATE DATABASE stepd_sql'
           SQLDB="${STEPD_TEST_DATABASE_URL%/*}/stepd_sql"
-          for f in rust/migrations/*.sql; do
+          for f in engine/rust/migrations/*.sql; do
             psql "$SQLDB" -v ON_ERROR_STOP=1 -q -f "$f"
           done
           psql "$SQLDB" -v ON_ERROR_STOP=1 -q \
-            -f rust/tests/sql/test_engine.sql \
-            -f rust/tests/sql/test_engine_ops.sql \
-            -f rust/tests/sql/test_cron.sql \
-            -f rust/tests/sql/test_invariants.sql
+            -f engine/rust/tests/sql/test_engine.sql \
+            -f engine/rust/tests/sql/test_engine_ops.sql \
+            -f engine/rust/tests/sql/test_cron.sql \
+            -f engine/rust/tests/sql/test_invariants.sql
 
       - name: live-database and end-to-end tests
         run: cargo test --workspace
-        working-directory: rust
+        working-directory: engine/rust
+
+      - name: conformance battery against the TypeScript app
+        # The claim this lane exists to keep honest: the protocol is
+        # implementable in a second language. The bundled Rust reference app and
+        # the battery were written together, so a pass there can only show the
+        # suite is self-consistent; this one crosses the language boundary.
+        #
+        # `--app-configure-url` is how an app the runner did not start learns the
+        # server's address and a token. Without it `blobs` and `truncation` are
+        # unreachable, which is why they are not declared yet.
+        run: |
+          set -euo pipefail
+          for w in spec/typescript sdk/typescript; do
+            (cd "$w" && pnpm install --frozen-lockfile && pnpm build)
+          done
+          (cd sdk/typescript/apps/conformance && PORT=9944 node --experimental-strip-types src/main.ts &)
+          for _ in $(seq 1 40); do
+            curl -sf http://127.0.0.1:9944/.well-known/stepd-conformance >/dev/null && break
+            sleep 0.25
+          done
+          psql "$STEPD_TEST_DATABASE_URL" -c 'CREATE DATABASE stepd_conf_ts'
+          cd engine/rust
+          cargo run -p stepd-cli -- \
+            --database-url "${STEPD_TEST_DATABASE_URL%/*}/stepd_conf_ts" \
+            conformance \
+            --app http://127.0.0.1:9944 \
+            --app-configure-url http://127.0.0.1:9944/_conformance/configure
 
       - name: conformance battery against the reference app
         # PRD T2 requires this lane. It is separate from `cargo test --workspace`
@@ -161,7 +271,7 @@ jobs:
         # test asserts there are none left — so a suite added to the protocol
         # fails this lane until somebody writes it.
         run: cargo test -p stepd-conformance --test battery -- --nocapture
-        working-directory: rust
+        working-directory: engine/rust
 
   # ---------------------------------------------------------------- tier 3
   pooler:
@@ -211,12 +321,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust
+          workspaces: |
+            spec/rust
+            sdk/rust
+            engine/rust
       - name: run the suite through the pooler
         # The engine's own migrate step runs through the pooler too. DDL through
         # a transaction-mode pooler is the part most likely to be surprising, so
         # it is worth exercising rather than routing around.
-        run: cd rust && cargo test --workspace
+        run: cd engine/rust && cargo test --workspace
 
   # ---------------------------------------------------------------- tier 3
   simulation:
@@ -241,10 +354,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust
+          workspaces: |
+            spec/rust
+            sdk/rust
+            engine/rust
       - name: Rust simulation against the real engine
         run: cargo test --release -p stepd-store-postgres --test simulation
-        working-directory: rust
+        working-directory: engine/rust
       - name: Python simulation against the model
         # Both are kept. The model finds design gaps — it found A8 on its first
         # run — and the Rust harness finds implementation gaps. Neither
@@ -278,9 +394,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust
+          workspaces: |
+            spec/rust
+            sdk/rust
+            engine/rust
       - run: cargo test --release -p stepd-store-postgres --test simulation
-        working-directory: rust
+        working-directory: engine/rust
       - name: report seeds per finding
         # Tracked as an efficiency metric (PRD §10.5): a seed budget that grows
         # without finding anything is a budget to spend somewhere else.

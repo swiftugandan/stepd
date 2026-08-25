@@ -103,7 +103,7 @@ only incidentally.
   the fuzzer cannot reach. This harness found gap A8 — `continue_as_new`
   orphaning live children — on its first run, via P8. The README records 120,000
   seeds with zero violations.
-* `rust/crates/stepd-store-postgres/tests/simulation.rs` — the same nine
+* `engine/rust/crates/stepd-store-postgres/tests/simulation.rs` — the same nine
   properties, the same eleven `FAULTS`, and the same swarm scheme, driving the
   **real** store against real PostgreSQL. Its module docstring states why the
   model is not enough: the three defects that actually shipped (a signal relayed

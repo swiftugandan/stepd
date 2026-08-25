@@ -31,7 +31,7 @@ enforced.
 
 Two categories, separated at the type level in the SDK and by source in the server.
 
-**Code-defined, travels in the manifest.** `Function` (`rust/crates/stepd-sdk/src/function.rs`)
+**Code-defined, travels in the manifest.** `Function` (`sdk/rust/crates/stepd-sdk/src/function.rs`)
 holds only what is a property of the workflow: `id`, `version`, `triggers`, `key_expr`,
 `singleton`, `retries`, `timeouts`, display `name`. `Function::config()` serialises exactly
 those fields and nothing else. There is no builder method that accepts a URL, a token or an
@@ -44,13 +44,13 @@ and the function array. The URL is in there deliberately: push transport means t
 must know where to call. The key is not, and never is.
 
 **Server configuration is environment-only.** `Config::from_env()`
-(`rust/crates/stepd-server/src/lib.rs`) reads `STEPD_DATABASE_URL`, `STEPD_BIND`,
+(`engine/rust/crates/stepd-server/src/lib.rs`) reads `STEPD_DATABASE_URL`, `STEPD_BIND`,
 `STEPD_WORKER`, `STEPD_MAX_CONNECTIONS`, `STEPD_SIGNING_KEY`, `STEPD_SIGNING_KEY_PREVIOUS`
 and the three egress variables. Nothing is read from a config file, and nothing that governs
 behaviour is read from the database or from a manifest, because a value that arrived over
 the network is a value a tenant can influence.
 
-**Keys are resolved out of band.** `DbTargetResolver` (`rust/crates/stepd-server/src/registry.rs`)
+**Keys are resolved out of band.** `DbTargetResolver` (`engine/rust/crates/stepd-server/src/registry.rs`)
 looks the app's URL up from `app_bindings` but takes the signing keys from `Config` — a
 per-app map with a default. The server and the app are configured with the same key by the
 orchestrator; neither learns it from the other. Two keys are live at once so rotation is not
@@ -106,16 +106,16 @@ a conforming app with a 401 that nobody connects to the missing variable. The SD
 
 ## Verification
 
-* `rust/crates/stepd-sdk/src/function.rs`, test `the_manifest_carries_no_credentials`:
+* `sdk/rust/crates/stepd-sdk/src/function.rs`, test `the_manifest_carries_no_credentials`:
   builds an `App` with `signing_key(b"super-secret")`, serialises `manifest()`, and asserts
   the string does not contain the key. This is the single assertion the whole rule rests on.
 * Same file, `an_app_without_a_key_fails_closed`: a missing key is a lint finding, never a
   silent slide into unsigned requests.
 * Same file, `the_manifest_checksum_is_stable_across_restarts`: the checksum covers sorted
   content, so hash-map iteration order cannot masquerade as a config change.
-* `rust/crates/stepd-server/src/lib.rs`, tests `configuration_comes_only_from_the_environment`,
+* `engine/rust/crates/stepd-server/src/lib.rs`, tests `configuration_comes_only_from_the_environment`,
   `rotation_accepts_two_keys_at_once` and `the_default_egress_policy_fails_closed`.
-* `rust/crates/stepd-server/src/registry.rs`: `DbTargetResolver` takes keys from `Config`;
+* `engine/rust/crates/stepd-server/src/registry.rs`: `DbTargetResolver` takes keys from `Config`;
   the doc comment states why they are not read from the manifest.
-* `rust/crates/stepd-cli/src/main.rs`, `serve()`: bails with a message naming
+* `engine/rust/crates/stepd-cli/src/main.rs`, `serve()`: bails with a message naming
   `STEPD_SIGNING_KEY` and protocol §9 rather than starting unconfigured.

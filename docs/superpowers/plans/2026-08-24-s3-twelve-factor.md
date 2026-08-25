@@ -46,10 +46,10 @@ the audit recorded in this session and reproduced per-task below, each with the
 
 | File | Responsibility | Touched by |
 |---|---|---|
-| `rust/crates/stepd-blobs-s3/src/lib.rs` | `S3Config`, `S3Backend`, the four `BlobBackend` methods, `check_bucket`, unit tests | 1, 2 |
-| `rust/crates/stepd-blobs-s3/tests/live.rs` | Live suite; **constructs `S3Config` literally at ~line 55** | 1, 2 |
-| `rust/crates/stepd-server/src/lib.rs` | `S3ConfigInput`, `EndpointInput`, `resolve`, `blob_backend_from`, config tests | 1, 2 |
-| `rust/crates/stepd-server/tests/end_to_end.rs` | S3 end-to-end; **constructs `S3Config` literally at ~line 1526**; stale CI comment at 1840-1847 | 1, 2, 3 |
+| `engine/rust/crates/stepd-blobs-s3/src/lib.rs` | `S3Config`, `S3Backend`, the four `BlobBackend` methods, `check_bucket`, unit tests | 1, 2 |
+| `engine/rust/crates/stepd-blobs-s3/tests/live.rs` | Live suite; **constructs `S3Config` literally at ~line 55** | 1, 2 |
+| `engine/rust/crates/stepd-server/src/lib.rs` | `S3ConfigInput`, `EndpointInput`, `resolve`, `blob_backend_from`, config tests | 1, 2 |
+| `engine/rust/crates/stepd-server/tests/end_to_end.rs` | S3 end-to-end; **constructs `S3Config` literally at ~line 1526**; stale CI comment at 1840-1847 | 1, 2, 3 |
 | `.env.example` | Operator-facing env documentation | 1, 2 |
 | `compose.yaml` | Stale claim that a second endpoint needs a code change | 1 |
 | `docs/blob-backends.md` | Object-store compatibility notes | 2 |
@@ -69,10 +69,10 @@ this process and every application. `compose.yaml` already documents the
 consequence and calls the fix "a code change rather than a compose one".
 
 **Files:**
-- Modify: `rust/crates/stepd-blobs-s3/src/lib.rs` (struct at `:104`, `:143`; `with_timeouts` at `:167`; call sites at `:270`, `:310`, `:325`, `:396`, `:523`)
-- Modify: `rust/crates/stepd-server/src/lib.rs` (`S3ConfigInput` at `:175`, `Debug` at `:189`, `resolve` at `:213`, `blob_backend_from` at `:496`, `probe_s3_config` at `:895`)
-- Modify: `rust/crates/stepd-blobs-s3/tests/live.rs` (`config()` at ~`:55`)
-- Modify: `rust/crates/stepd-server/tests/end_to_end.rs` (`s3_config()` at ~`:1526`)
+- Modify: `engine/rust/crates/stepd-blobs-s3/src/lib.rs` (struct at `:104`, `:143`; `with_timeouts` at `:167`; call sites at `:270`, `:310`, `:325`, `:396`, `:523`)
+- Modify: `engine/rust/crates/stepd-server/src/lib.rs` (`S3ConfigInput` at `:175`, `Debug` at `:189`, `resolve` at `:213`, `blob_backend_from` at `:496`, `probe_s3_config` at `:895`)
+- Modify: `engine/rust/crates/stepd-blobs-s3/tests/live.rs` (`config()` at ~`:55`)
+- Modify: `engine/rust/crates/stepd-server/tests/end_to_end.rs` (`s3_config()` at ~`:1526`)
 - Modify: `.env.example`, `compose.yaml`
 - Test: same files (`#[cfg(test)]` modules, in-crate)
 
@@ -85,7 +85,7 @@ consequence and calls the fix "a code change rather than a compose one".
 
 - [ ] **Step 1: Write the failing tests**
 
-In the `#[cfg(test)] mod tests` of `rust/crates/stepd-blobs-s3/src/lib.rs`:
+In the `#[cfg(test)] mod tests` of `engine/rust/crates/stepd-blobs-s3/src/lib.rs`:
 
 ```rust
 /// A config whose two endpoints differ, so a test can tell which one signed.
@@ -148,7 +148,7 @@ fn no_public_endpoint_signs_against_the_only_endpoint_there_is() {
 }
 ```
 
-In the `#[cfg(test)] mod tests` of `rust/crates/stepd-server/src/lib.rs`:
+In the `#[cfg(test)] mod tests` of `engine/rust/crates/stepd-server/src/lib.rs`:
 
 ```rust
 #[test]
@@ -207,7 +207,7 @@ correct red here; there is no runtime behaviour to observe yet.
 
 - [ ] **Step 3: Add the field to `S3Config` and split the bucket**
 
-In `rust/crates/stepd-blobs-s3/src/lib.rs`, add to `S3Config` after `endpoint`:
+In `engine/rust/crates/stepd-blobs-s3/src/lib.rs`, add to `S3Config` after `endpoint`:
 
 ```rust
     /// Base URL to sign *app-facing* URLs against, when applications reach the
@@ -299,7 +299,7 @@ whole bug this task exists to prevent, so change them deliberately:
 
 - [ ] **Step 5: Add the field to `S3ConfigInput` and read it**
 
-In `rust/crates/stepd-server/src/lib.rs`, add to `S3ConfigInput` after
+In `engine/rust/crates/stepd-server/src/lib.rs`, add to `S3ConfigInput` after
 `endpoint`:
 
 ```rust
@@ -348,7 +348,7 @@ Add `public_endpoint: EndpointInput::Unset,` to `probe_s3_config`.
 
 - [ ] **Step 6: Fix the two test-file construction sites**
 
-`rust/crates/stepd-blobs-s3/tests/live.rs`, in `config()`, add to the
+`engine/rust/crates/stepd-blobs-s3/tests/live.rs`, in `config()`, add to the
 `S3Config` literal:
 
 ```rust
@@ -359,7 +359,7 @@ Add `public_endpoint: EndpointInput::Unset,` to `probe_s3_config`.
             .map(|v| v.parse().expect("STEPD_TEST_S3_PUBLIC_ENDPOINT is a URL")),
 ```
 
-`rust/crates/stepd-server/tests/end_to_end.rs`, in `s3_config()`, add:
+`engine/rust/crates/stepd-server/tests/end_to_end.rs`, in `s3_config()`, add:
 
 ```rust
         public_endpoint: None,
@@ -406,9 +406,9 @@ compose one." Replace that paragraph with:
 
 ```bash
 cd /Users/p.munaawa/Documents/projects/labs/stepd
-cargo fmt --all --manifest-path rust/Cargo.toml
-cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
-git add rust/crates/stepd-blobs-s3 rust/crates/stepd-server compose.yaml .env.example
+cargo fmt --all --manifest-path engine/rust/Cargo.toml
+cargo clippy --manifest-path engine/rust/Cargo.toml --workspace --all-targets -- -D warnings
+git add engine/rust/crates/stepd-blobs-s3 engine/rust/crates/stepd-server compose.yaml .env.example
 git commit -m "blobs: presign against the address apps can reach, not the one the server uses
 
 One endpoint had to serve two network vantage points: the server's own
@@ -435,9 +435,9 @@ injects the token owns its expiry. This is a deliberate line, and Step 6 writes
 it down rather than letting an operator infer a refresh that does not happen.
 
 **Files:**
-- Modify: `rust/crates/stepd-blobs-s3/src/lib.rs` (struct `:104`, `with_timeouts` `:167`)
-- Modify: `rust/crates/stepd-server/src/lib.rs` (`S3ConfigInput` `:175`, `resolve` `:213`, `blob_backend_from` `:496`, `probe_s3_config` `:895`)
-- Modify: `rust/crates/stepd-blobs-s3/tests/live.rs`, `rust/crates/stepd-server/tests/end_to_end.rs`
+- Modify: `engine/rust/crates/stepd-blobs-s3/src/lib.rs` (struct `:104`, `with_timeouts` `:167`)
+- Modify: `engine/rust/crates/stepd-server/src/lib.rs` (`S3ConfigInput` `:175`, `resolve` `:213`, `blob_backend_from` `:496`, `probe_s3_config` `:895`)
+- Modify: `engine/rust/crates/stepd-blobs-s3/tests/live.rs`, `engine/rust/crates/stepd-server/tests/end_to_end.rs`
 - Modify: `.env.example`, `docs/blob-backends.md`
 
 **Interfaces:**
@@ -447,7 +447,7 @@ it down rather than letting an operator infer a refresh that does not happen.
 
 - [ ] **Step 1: Write the failing tests**
 
-In `rust/crates/stepd-blobs-s3/src/lib.rs` tests:
+In `engine/rust/crates/stepd-blobs-s3/src/lib.rs` tests:
 
 ```rust
 #[test]
@@ -496,7 +496,7 @@ fn a_session_token_does_not_reach_a_debug_line() {
 }
 ```
 
-In `rust/crates/stepd-server/src/lib.rs` tests:
+In `engine/rust/crates/stepd-server/src/lib.rs` tests:
 
 ```rust
 #[test]
@@ -548,7 +548,7 @@ Expected: FAIL to compile — no field `session_token` on either struct.
 
 - [ ] **Step 3: Add the field and use the token-bearing constructor**
 
-In `rust/crates/stepd-blobs-s3/src/lib.rs`, add to `S3Config` after
+In `engine/rust/crates/stepd-blobs-s3/src/lib.rs`, add to `S3Config` after
 `secret_key`:
 
 ```rust
@@ -588,7 +588,7 @@ and use `credentials,` in the struct literal.
 
 - [ ] **Step 4: Read it from the environment**
 
-In `rust/crates/stepd-server/src/lib.rs`, add to `S3ConfigInput` after
+In `engine/rust/crates/stepd-server/src/lib.rs`, add to `S3ConfigInput` after
 `secret_key`:
 
 ```rust
@@ -662,9 +662,9 @@ an assumption it will renew itself.
 
 ```bash
 cd /Users/p.munaawa/Documents/projects/labs/stepd
-cargo fmt --all --manifest-path rust/Cargo.toml
-cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
-git add rust/crates/stepd-blobs-s3 rust/crates/stepd-server .env.example docs/blob-backends.md
+cargo fmt --all --manifest-path engine/rust/Cargo.toml
+cargo clippy --manifest-path engine/rust/Cargo.toml --workspace --all-targets -- -D warnings
+git add engine/rust/crates/stepd-blobs-s3 engine/rust/crates/stepd-server .env.example docs/blob-backends.md
 git commit -m "blobs: accept a session token, so the credential can be temporary
 
 Only Credentials::new was ever used, so an AssumeRole, IRSA or
@@ -702,7 +702,7 @@ through the sanctioned route.
 **Files:**
 - Modify: `.github/workflows/ci.yml` (**hook-protected**; job `integration`, env block after `:107`, steps after `:110` and after `:153`)
 - Modify: `README.md` (honest-gaps bullet on the S3 evidence)
-- Modify: `rust/crates/stepd-server/tests/end_to_end.rs:1840-1847`
+- Modify: `engine/rust/crates/stepd-server/tests/end_to_end.rs:1840-1847`
 
 **Interfaces:**
 - Consumes: nothing. Tasks 1 and 2 leave the lane's env and steps unchanged —
@@ -821,7 +821,7 @@ python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/ci.yml')); p
 All three become false the moment the lane merges, and a comment describing a
 property the code lacks is worse than none.
 
-`rust/crates/stepd-server/tests/end_to_end.rs:1840-1847` — replace the "On CI"
+`engine/rust/crates/stepd-server/tests/end_to_end.rs:1840-1847` — replace the "On CI"
 paragraph with:
 
 ```rust
@@ -854,7 +854,7 @@ says the S3 suites "need `STEPD_TEST_S3_*` and nothing automatic sets it".
 
 ```bash
 cd /Users/p.munaawa/Documents/projects/labs/stepd
-git add .github/workflows/ci.yml README.md rust/crates/stepd-server/tests/end_to_end.rs
+git add .github/workflows/ci.yml README.md engine/rust/crates/stepd-server/tests/end_to_end.rs
 git commit -m "ci: prove bytes skip the control plane on the S3 backend
 
 Re-applies the lane from 4f519a1, which d59af82 reverted for reaching a

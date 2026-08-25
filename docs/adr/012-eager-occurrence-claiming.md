@@ -38,7 +38,7 @@ appears; what matters is **when** it happens:
 the memo, and returns a future whose hash is already fixed.**
 
 This is the load-bearing sentence of the whole SDK, and it is documented as such in the
-module docs of `rust/crates/stepd-sdk-core/src/lib.rs`.
+module docs of `sdk/rust/crates/stepd-sdk-core/src/lib.rs`.
 
 Consequences that follow directly: `join!`, `select!`, `FuturesUnordered` and hand-rolled
 polling are all safe without the user importing anything from stepd, because every hash was
@@ -100,7 +100,7 @@ Layered defences cover what eager claiming alone cannot:
 
 ## Verification
 
-All in `rust/crates/stepd-sdk-core/src/tests.rs` unless noted.
+All in `sdk/rust/crates/stepd-sdk-core/src/tests.rs` unless noted.
 
 * `eager_claiming_makes_poll_order_irrelevant` — futures created in order `a, b, a` and polled
   in reverse produce identical hashes. This is the property the design exists for.

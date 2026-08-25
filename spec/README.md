@@ -5,6 +5,10 @@ and an **app** hosting workflow code via an SDK.
 
 Licence: Apache-2.0. Anyone may implement a server or an SDK against this spec.
 
+The bindings live here rather than inside an implementation: both the engine and
+every SDK depend on them, and a contract owned by one of its consumers stops
+being a contract ([ADR-024](../docs/adr/024-language-trees.md)).
+
 ## Contents
 
 | Path | What |
@@ -13,6 +17,9 @@ Licence: Apache-2.0. Anyone may implement a server or an SDK against this spec.
 | `schemas/` | JSON Schema (2020-12) for every message |
 | `examples/` | Valid example payloads, used as fixtures |
 | `validate.py` | Validates examples and negative cases against the schemas |
+| `rust/` | `stepd-proto` — the wire contract as a Rust crate. Its own workspace, depending on nothing; see [`rust/README.md`](rust/README.md) |
+| `typescript/` | `@stepd/protocol` — the same contract in TypeScript; see [`typescript/README.md`](typescript/README.md) |
+| `fixtures/` | Cross-language test vectors for the step hash and the signature. Generated from the Rust binding; every binding asserts against this one file rather than against each other |
 
 ## Schemas
 
@@ -69,4 +76,11 @@ Implementers should read those two sections before anything else.
    concurrent tasks claim occurrence counters.
 9. Never drop a running step future to meet a deadline; abandon the response instead (§7.1.1).
 10. Nonce per request, and a replay cache over the signature window (§9).
-11. Pass `stepd conformance --app <url>` at level 1, then level 2.
+11. Conformance mode (§12.1), as a separate binary or an explicit opt-in flag —
+    never a default route: `/.well-known/stepd-conformance`,
+    `/_conformance/effects`, `/_conformance/reset`, and — if you declare `blobs`
+    or `truncation` — `/_conformance/configure`, which is the only way your app
+    learns the server's address and a token.
+12. Pass `stepd conformance --app <url>` at level 1, then level 2. Add
+    `--app-configure-url <url>` for the endpoint in 11; without it, do not
+    declare `blobs` or `truncation`.

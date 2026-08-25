@@ -42,7 +42,7 @@ deliberate exception, it is warned about, and it is what makes `stepd dev` work 
 account.
 
 **The upload and read URLs are signed capabilities, and the MAC covers the whole
-capability.** `Capability::sign` in `rust/crates/stepd-store-postgres/src/blobs/mod.rs`
+capability.** `Capability::sign` in `engine/rust/crates/stepd-store-postgres/src/blobs/mod.rs`
 HMACs `"{id}.{dir}.{size}.{expires}"`. Every field is load-bearing:
 
 * `id` — a leaked URL cannot be pointed at another blob.
@@ -75,7 +75,7 @@ reservation sweep. Closing the gap between the two would mean `attach_read_urls`
 `state`, which it does not.
 
 **Content addressing is per namespace, never global.** `UNIQUE (ns, sha256)` on `blobs`
-(`rust/migrations/0001_initial.sql`); `reserve` looks up `WHERE ns=$1 AND sha256=$2`. A
+(`engine/rust/migrations/0001_initial.sql`); `reserve` looks up `WHERE ns=$1 AND sha256=$2`. A
 global scope would let one tenant probe for another's data by reserving a digest and seeing
 whether the upload was skipped — an oracle over every byte sequence an attacker can guess.
 Dedupe is what makes retrying a run cheap; it is not worth a cross-tenant side channel.
@@ -184,7 +184,7 @@ verification, URL minting and deletion (§8.5).
 
 ## Verification
 
-* `rust/crates/stepd-store-postgres/src/blobs/mod.rs`: `a_write_capability_cannot_be_replayed_as_a_read`
+* `engine/rust/crates/stepd-store-postgres/src/blobs/mod.rs`: `a_write_capability_cannot_be_replayed_as_a_read`
   (a `write` signature fails verification as `read`) and
   `a_capability_is_bound_to_one_blob_and_one_size` (substituting the id or the declared size
   fails, "or a write URL uploads more than was reserved").
@@ -193,31 +193,31 @@ verification, URL minting and deletion (§8.5).
   `reserve` scopes the digest lookup by namespace and carries the comment on the probing
   attack; `commit_blob` checks size and digest before `state='committed'`, returning
   `blob_digest_mismatch`; `collect` deletes bytes before rows.
-* `rust/crates/stepd-store-postgres/src/blobs/filesystem.rs`, the backend behind
+* `engine/rust/crates/stepd-store-postgres/src/blobs/filesystem.rs`, the backend behind
   `stepd dev`: `blob_paths_shard_and_stay_under_the_root` with `is_within`, against path
   traversal; `a_stored_object_reports_its_size_but_not_a_digest` (the `None` that sends
   `commit_blob` down the read-and-hash arm); `a_missing_object_is_absent_rather_than_an_error`;
   `the_filesystem_backend_admits_it_cannot_presign`.
-* `rust/crates/stepd-core/src/blobs.rs`, where the reference walk now lives so the engine and
+* `engine/rust/crates/stepd-core/src/blobs.rs`, where the reference walk now lives so the engine and
   the store share one: `blob_references_are_found_wherever_they_are_nested` (a `$blob` inside
   an array inside an object is found — what the reference count depends on).
-* `rust/crates/stepd-core/tests/engine.rs`, for verify-at-op-commit rather than on first read:
+* `engine/rust/crates/stepd-core/tests/engine.rs`, for verify-at-op-commit rather than on first read:
   `a_blob_reference_that_fails_verification_fails_the_run_and_records_no_ops`,
   `a_run_with_no_blob_references_commits_the_same_with_or_without_a_blob_store`, and
   `an_already_committed_blob_reference_commits_normally`, whose store-side counterpart is
   `committing_an_already_committed_blob_does_not_look_at_the_object_again` in
-  `rust/crates/stepd-store-postgres/tests/live.rs`.
+  `engine/rust/crates/stepd-store-postgres/tests/live.rs`.
 * Read URLs come from the backend, not from the relay capability:
   `read_urls_are_minted_by_the_backend_not_by_the_relay_capability`,
   `a_read_url_failure_on_one_reference_does_not_stop_the_walk` and
   `a_read_url_failure_clears_any_preexisting_url_rather_than_leaving_it` (the last because a
   stale `url` left in place would be trusted by a range read that verifies nothing), all in
-  `rust/crates/stepd-store-postgres/src/blobs/mod.rs`.
+  `engine/rust/crates/stepd-store-postgres/src/blobs/mod.rs`.
 * The relay route exists only where it is needed:
   `a_presigning_backend_does_not_expose_the_relay_route` in
-  `rust/crates/stepd-server/tests/end_to_end.rs`, and the same 404 asserted against a real S3
+  `engine/rust/crates/stepd-server/tests/end_to_end.rs`, and the same 404 asserted against a real S3
   backend inside `no_object_bytes_reach_the_server_on_the_s3_path`.
-* `rust/crates/stepd-blobs-s3/src/lib.rs`, offline: `an_upload_target_binds_the_digest_and_the_length`,
+* `engine/rust/crates/stepd-blobs-s3/src/lib.rs`, offline: `an_upload_target_binds_the_digest_and_the_length`,
   `the_declared_digest_is_sent_base64_not_hex`,
   `a_checksum_read_back_from_metadata_is_the_digest_that_was_declared`,
   `objects_are_keyed_by_blob_id_rather_than_by_digest` (keying by digest would make
@@ -225,14 +225,14 @@ verification, URL minting and deletion (§8.5).
   `neither_the_config_nor_the_backend_prints_its_secret_key`,
   `the_s3_backend_presigns_and_says_which_backend_it_is`, and
   `a_bucket_check_against_nothing_listening_is_unreachable_not_a_panic`.
-* `rust/crates/stepd-server/src/lib.rs`, for configuration: `the_default_blob_backend_is_the_filesystem`,
+* `engine/rust/crates/stepd-server/src/lib.rs`, for configuration: `the_default_blob_backend_is_the_filesystem`,
   `selecting_s3_without_a_bucket_is_refused_rather_than_defaulted`,
   `selecting_s3_with_no_endpoint_is_refused_rather_than_silently_accepted`,
   `selecting_s3_with_no_credentials_is_also_refused`, `a_fully_configured_s3_backend_validates`,
   `blob_backend_is_read_case_and_whitespace_insensitively`, and
   `an_unrecognised_blob_backend_falls_back_to_the_filesystem_rather_than_hanging`.
 * **Against a live object store, and only where one is configured.**
-  `rust/crates/stepd-blobs-s3/tests/live.rs` —
+  `engine/rust/crates/stepd-blobs-s3/tests/live.rs` —
   `the_store_refuses_bytes_that_do_not_match_the_declared_digest`,
   `a_client_cannot_swap_the_checksum_for_one_matching_its_own_bytes`,
   `an_object_the_store_reports_no_checksum_for_is_an_error_not_a_fallback` (the one that
@@ -241,7 +241,7 @@ verification, URL minting and deletion (§8.5).
   is right, *not* that no transfer happened — see "What we accept"),
   `a_presigned_read_serves_a_range`, `deleting_an_object_is_idempotent` — and
   `no_object_bytes_reach_the_server_on_the_s3_path` in
-  `rust/crates/stepd-server/tests/end_to_end.rs`, which drives a real run through a real SDK
+  `engine/rust/crates/stepd-server/tests/end_to_end.rs`, which drives a real run through a real SDK
   app and asserts that everything crossing the server's own socket stayed under 32 KiB while
   a 256 KiB payload reached the object store. All of these skip loudly without
   `STEPD_TEST_S3_*`, which no lane in `.github/workflows/ci.yml` sets. The end-to-end one
@@ -249,8 +249,8 @@ verification, URL minting and deletion (§8.5).
   `tier 2 · integration` runs the test on pushes to `main` and on pull requests
   (`ci.yml:20-25`), where it skips for want of the S3 variables. Evidence that passes
   locally, then, and nothing automatic.
-* `rust/migrations/0001_initial.sql`: `blobs` carries `UNIQUE (ns, sha256)` commented "dedupe
+* `engine/rust/migrations/0001_initial.sql`: `blobs` carries `UNIQUE (ns, sha256)` commented "dedupe
   within a tenant, never across"; `blob_refs` is keyed `(blob_id, run_id, step_hash)`.
-* `spec/PROTOCOL.md` §8 is the normative statement; `rust/crates/stepd-cli/src/doctor.rs`
+* `spec/PROTOCOL.md` §8 is the normative statement; `engine/rust/crates/stepd-cli/src/doctor.rs`
   reports reservations older than 24 h as bytes nothing references, and on an S3 backend adds
   a probe that the bucket answers with the configured credentials.
