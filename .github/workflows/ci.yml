@@ -87,15 +87,22 @@ jobs:
       # These packages need no database and no server — that is the whole point
       # of where they sit — so they belong in the tier that runs on every push
       # and finishes in a minute.
-      - name: install, typecheck, test, build
+      - name: install, build, typecheck, test
+        # Build BEFORE typecheck, and not the other way round. `@stepd/sdk`
+        # resolves `@stepd/sdk-core` through its `dist`, so typechecking first
+        # fails on a module that has not been emitted yet — which is exactly what
+        # this lane caught on its first run, and what a local machine with a
+        # warm `dist` hides. `pnpm -r build` is topological, so within a
+        # workspace the order takes care of itself; across workspaces the loop
+        # order does, since `sdk` depends on `spec` and not the reverse.
         run: |
           for w in spec/typescript sdk/typescript; do
             echo "::group::$w"
             (cd "$w" \
               && pnpm install --frozen-lockfile \
+              && pnpm build \
               && pnpm typecheck \
-              && pnpm test \
-              && pnpm build)
+              && pnpm test)
             echo "::endgroup::"
           done
 
