@@ -91,6 +91,14 @@ pub struct PostgresStore {
     /// both; one that only reads references minted elsewhere would have only
     /// the first.
     blob_collector: Option<Arc<blobs::PostgresBlobStore>>,
+    /// Inline journal ceiling for one attempt, in steps.
+    ///
+    /// Per-instance rather than read from the environment at the point of use.
+    /// Two stores in one process — a test standing up two servers, the
+    /// conformance battery running several batteries — must be able to differ,
+    /// and a `std::env::var` in the hot path makes that impossible while looking
+    /// like configuration.
+    attempt_state_limit: i64,
     /// Round-robin position for the cron sweep's namespace rotation.
     ///
     /// Per-replica and not persisted, deliberately. It exists to stop one
@@ -118,8 +126,21 @@ impl PostgresStore {
             pool,
             blob_backend: None,
             blob_collector: None,
+            attempt_state_limit: attempt_state_limit(),
             cron_cursor: Arc::new(tokio::sync::Mutex::new(0)),
         }
+    }
+
+    /// Override the inline journal ceiling (protocol §8.6).
+    ///
+    /// Defaults to `STEPD_ATTEMPT_STATE_LIMIT`, or 2000. Values below 1 are
+    /// ignored: a ceiling of zero would truncate every attempt, including the
+    /// first, and an app would page a journal that has nothing in it.
+    pub fn with_attempt_state_limit(mut self, steps: i64) -> Self {
+        if steps > 0 {
+            self.attempt_state_limit = steps;
+        }
+        self
     }
 
     /// Attach the backend, so `$blob` values shipped to an attempt carry a
@@ -399,7 +420,7 @@ impl StateStore for PostgresStore {
         // Bound the journal shipped inline. Over the limit the app fetches the
         // rest through `steps_page` (protocol §8.6); silently truncating instead
         // would make the SDK re-execute steps whose results merely were not sent.
-        let cap = attempt_state_limit();
+        let cap = self.attempt_state_limit;
         let rows = sqlx::query(&format!(
             "SELECT step_hash, step_id, op::text AS op, status::text AS status, result, error
                FROM run_steps WHERE run_id = $1 AND {SHIPPABLE}

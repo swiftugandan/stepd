@@ -56,7 +56,7 @@ engine crates ([ADR-024](docs/adr/024-language-trees.md)).
 | `stepd-expr-cel` | Complete (documented subset) | 16 tests |
 | `stepd-transport-http` | Complete | 10 tests |
 | `stepd-sdk-core` | Complete | 32 tests — the R1 machinery |
-| `stepd-sdk` | Complete | 30 tests, including the workflow test harness |
+| `stepd-sdk` | Complete | 31 tests, including the workflow test harness and §8.6 journal paging |
 | `stepd-server` | Complete | 42 unit + 19 end-to-end |
 | `stepd-blobs-s3` | Complete | 8 offline + 6 live; the live ones need `STEPD_TEST_S3_*` |
 | `stepd-cli` | Complete | `serve` · `migrate` · `doctor` · `dev` · `token` · `run` · `limits` · `conformance` |

@@ -415,6 +415,7 @@ pub struct App {
     pub(crate) functions: HashMap<String, Function>,
     pub(crate) executor: LocalExecutor,
     pub(crate) dev_mode: bool,
+    pub(crate) journal: crate::journal::JournalSource,
 }
 
 impl App {
@@ -427,7 +428,31 @@ impl App {
             functions: HashMap::new(),
             executor: LocalExecutor::default(),
             dev_mode: false,
+            journal: crate::journal::JournalSource::default(),
         }
+    }
+
+    /// Where to page a journal too large to ship inline (protocol §8.6).
+    ///
+    /// `token` needs the operator role. Without this an attempt carrying
+    /// `state_truncated` fails non-retryably, naming this method — which is the
+    /// correct behaviour, because the alternative is replaying against a partial
+    /// journal and silently re-executing every step the app could not see.
+    ///
+    /// Only runs that reach the server's inline ceiling are affected, so an app
+    /// whose runs stay small never needs it.
+    pub fn journal_source(self, base_url: impl AsRef<str>, token: impl AsRef<str>) -> Self {
+        self.journal.configure(base_url.as_ref(), token.as_ref());
+        self
+    }
+
+    /// The same setting, as a handle that outlives [`App::router`].
+    ///
+    /// `router` consumes the `App`, and the server's address is not always known
+    /// before then — a conformance app is told it once it is already serving
+    /// (§12.1). Take this first and configure it later.
+    pub fn journal_handle(&self) -> crate::journal::JournalSource {
+        self.journal.clone()
     }
 
     /// Add a signing key. Call twice during rotation: both are accepted, and the

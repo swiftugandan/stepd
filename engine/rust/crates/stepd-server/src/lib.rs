@@ -102,6 +102,14 @@ pub struct Config {
     pub blob_max_size: i64,
     /// How long a reservation that was never uploaded survives before collection.
     pub blob_reservation_ttl: chrono::Duration,
+
+    /// Steps shipped inline with one attempt before the journal is paginated
+    /// (protocol §8.6). `None` reads `STEPD_ATTEMPT_STATE_LIMIT`, default 2000.
+    ///
+    /// Explicit here so a test can force truncation. The path an app takes when
+    /// `state_truncated` is set is otherwise only reachable by building a run
+    /// with two thousand steps, which is why nothing exercised it.
+    pub attempt_state_limit: Option<i64>,
 }
 
 /// Where managed blob bytes live and which [`BlobBackend`] serves them.
@@ -332,6 +340,7 @@ impl Default for Config {
             blob_key: Vec::new(),
             blob_max_size: 100 * 1024 * 1024,
             blob_reservation_ttl: chrono::Duration::hours(24),
+            attempt_state_limit: None,
         }
     }
 }
@@ -679,6 +688,9 @@ impl Server {
 
         let mut store =
             PostgresStore::connect(&config.database_url, config.max_connections).await?;
+        if let Some(limit) = config.attempt_state_limit {
+            store = store.with_attempt_state_limit(limit);
+        }
         // Managed blobs are optional. A server with no blob signing key still
         // runs every other path; `:reserve` answers 501 (`ServerState::blobs`)
         // and `router()` sees `blobs: None`, so the §8.3.2 relay route is not

@@ -200,6 +200,35 @@ side must expose is half a contract.** This one was written from the runner's
 point of view — what it needs to observe — and the direction it forgot was the
 one where the app is the caller.
 
+### A suite that could not fail (found the same day)
+
+`truncation` asserts that a journal too large to ship inline replays without
+re-executing. It ran green from the day it was written and asserted nothing.
+
+`conf-truncation` records forty steps. `STEPD_ATTEMPT_STATE_LIMIT` defaults to
+2000 and the harness did not override it, so `state_truncated` was never set, the
+journal always arrived whole, and the case verified that forty steps each execute
+once — true, and nothing to do with §8.6. The Rust SDK passed it while
+`serve.rs` refused truncated journals outright, which is the tell: an
+implementation that cannot do the thing passed the suite for the thing.
+
+The harness now runs at ten steps, so the case truncates; the SDK pages; and
+`without_any_callback_the_suites_that_need_one_fail` asserts the suite *fails*
+with nowhere to page from, because otherwise the same vacuity returns silently
+the next time a default changes.
+
+Two findings, and the second is the more general one:
+
+1. **A conformance suite needs its own control.** The battery is full of
+   assertions that a conforming app passes. It had almost none that a
+   non-conforming app fails, and the one suite where that gap mattered is the one
+   where a default silently disabled the condition under test.
+2. **Making the case bite immediately found a second defect** — the engine
+   retries a 400 instead of failing the run non-retryably
+   ([#30](https://github.com/swiftugandan/stepd/issues/30)). That path had no
+   coverage at all, because an app returning 400 was something no suite could
+   produce. A test that cannot fail also hides everything downstream of it.
+
 ### What the suite found
 
 Four defects, all in the shape this project keeps finding: a feature specified,

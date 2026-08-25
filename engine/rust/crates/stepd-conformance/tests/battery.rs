@@ -61,7 +61,7 @@ async fn run_battery(only: &[&str]) -> Option<Report> {
         database_url,
         only: only.iter().map(|s| s.to_string()).collect(),
         on_ready: Some(stepd_conformance::OnReady::sync(move |api_base, token| {
-            state.configure_blobs(api_base, token)
+            state.configure(api_base, token)
         })),
         ..Default::default()
     })
@@ -231,7 +231,7 @@ async fn a_fixed_api_bind_is_honoured() {
         only: vec!["memoization".into()],
         api_bind: format!("127.0.0.1:{port}"),
         on_ready: Some(stepd_conformance::OnReady::sync(move |api_base, token| {
-            state.configure_blobs(api_base, token)
+            state.configure(api_base, token)
         })),
         ..Default::default()
     })
@@ -265,16 +265,43 @@ async fn without_any_callback_the_suites_that_need_one_fail() {
     let report = stepd_conformance::run(Options {
         app_url,
         database_url,
-        only: vec!["blobs".into()],
+        only: vec!["blobs".into(), "truncation".into()],
         on_ready: None,
+        // Short, because the truncation case here cannot settle and waiting the
+        // default 90s for that is dead time in every CI run.
+        //
+        // It cannot settle because of a defect this test found and does not fix.
+        // The SDK correctly answers 400 — it has nowhere to page from — and
+        // protocol §2.2 says a 400 fails the run non-retryably. The dispatcher
+        // does not do that: `Dispatcher::drive` funnels every transport error
+        // into `handle_failure` with the code `transport`, which backs off and
+        // retries, and never consults `Error::is_retryable` even though
+        // `Error::Config` (which is what a 400 becomes) returns false from it.
+        // So the run sits Pending between retries instead of failing.
+        //
+        // Nothing had exercised the path: an app returning 400 is the one thing
+        // no suite could produce while `truncation` could not truncate. Filed as
+        // https://github.com/swiftugandan/stepd/issues/30.
+        case_timeout: std::time::Duration::from_secs(20),
         ..Default::default()
     })
     .await
     .expect("the battery ran");
+    eprintln!("{report}");
 
     assert!(
         !report.suite_passed("blobs"),
         "blobs passed with no blob client configured, so the callback proves nothing:\n{report}"
+    );
+    // And this is what says the harness's low `attempt_state_limit` really
+    // truncates. Unconfigured, the SDK has nowhere to page from and must refuse
+    // the attempt; if `truncation` passed here, `state_truncated` was never set
+    // and the suite is asserting nothing about §8.6 — which is exactly the state
+    // it was in at the 2000-step default.
+    assert!(
+        !report.suite_passed("truncation"),
+        "truncation passed with nowhere to page from, so the journal was never \
+         truncated and the suite tests nothing:\n{report}"
     );
 }
 

@@ -64,6 +64,7 @@ pub mod serve;
 pub mod testing;
 
 pub mod blobs;
+pub mod journal;
 
 pub use blobs::{Blob, BlobError, Blobs};
 pub use executor::LocalExecutor;

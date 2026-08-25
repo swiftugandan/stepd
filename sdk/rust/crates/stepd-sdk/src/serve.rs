@@ -223,7 +223,7 @@ async fn attempt(
         return e.into_response();
     }
 
-    let attempt: Attempt = match serde_json::from_str(raw) {
+    let mut attempt: Attempt = match serde_json::from_str(raw) {
         Ok(a) => a,
         Err(e) => return ServeError::Malformed(e.to_string()).into_response(),
     };
@@ -240,18 +240,21 @@ async fn attempt(
         .into_response();
     }
 
-    // §8.6: the SDK must fetch the rest of a paginated journal before replaying,
-    // or fail non-retryably. Replaying against a partial journal would re-execute
-    // steps whose results merely were not sent — silent double execution, which
-    // is worse than a clear failure.
+    // §8.6: fetch the rest of a paginated journal before replaying, or fail
+    // non-retryably. Replaying against a partial journal would re-execute steps
+    // whose results merely were not sent — silent double execution, which is
+    // worse than a clear failure, so an app with nowhere to page from still
+    // refuses rather than proceeding on what it happens to hold.
     if attempt.state_truncated {
-        return ServeError::Malformed(
-            "the attempt journal was truncated and this SDK build cannot yet page it; \
-             raise STEPD_ATTEMPT_STATE_LIMIT on the server or split the run with \
-             continue_as_new (protocol §8.6)"
-                .into(),
-        )
-        .into_response();
+        match state
+            .app
+            .journal
+            .fetch_remaining(attempt.run.id, &attempt.steps)
+            .await
+        {
+            Ok(complete) => attempt.steps = complete,
+            Err(why) => return ServeError::Malformed(why).into_response(),
+        }
     }
 
     let function_id = attempt.run.function_id.clone();

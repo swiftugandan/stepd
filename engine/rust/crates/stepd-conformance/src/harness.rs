@@ -259,6 +259,13 @@ impl Harness {
                 )),
             },
             blob_base_url: format!("http://{api_addr}"),
+            // Low enough that `conf-truncation`'s forty steps actually
+            // truncate. At the 2000 default the suite ran green without ever
+            // setting `state_truncated`, so it asserted that forty steps each
+            // execute once — true, and nothing to do with §8.6. The one thing it
+            // exists to catch, an SDK replaying a partial journal and silently
+            // re-executing what it could not see, was unreachable.
+            attempt_state_limit: Some(10),
             ..Default::default()
         };
 

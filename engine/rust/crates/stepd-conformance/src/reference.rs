@@ -45,8 +45,16 @@ pub struct AppState {
     /// Deferred, because the app must serve before the runner's server exists:
     /// the runner reads the manifest over this socket to decide whether there is
     /// an app under test at all, and only then binds the API the client points
-    /// at. Filled in through [`AppState::configure_blobs`].
+    /// at. Filled in through [`AppState::configure`].
     blobs: Mutex<Option<stepd_sdk::Blobs>>,
+    /// Where the SDK pages a truncated journal from (§8.6).
+    ///
+    /// A handle into the `App`, not something this app's handlers use: paging
+    /// happens inside `stepd-sdk` before the pass runs. It lives here so that
+    /// one `configure` call covers everything an app has to be told, whether it
+    /// arrives in-process or over `/_conformance/configure`. Splitting them is
+    /// how `truncation` came to be configured on one path and not the other.
+    journal: Mutex<Option<stepd_sdk::journal::JournalSource>>,
     /// What each run's handler actually executed, in order.
     ///
     /// The whole reason §12.1 requires the effect-log endpoint: "the step body
@@ -60,13 +68,25 @@ pub struct AppState {
 pub type State = Arc<AppState>;
 
 impl AppState {
-    /// Point this app's blob client at a server.
+    /// Everything this app has to be told once the runner's API socket is bound.
     ///
-    /// Called by whoever started the app, once the runner's API socket is bound.
-    /// Without it `conf-blobs` fails loudly rather than silently skipping, which
-    /// is the behaviour the suite is checking for everywhere else.
-    pub fn configure_blobs(&self, stepd_url: &str, token: &str) {
+    /// One call, because there are two consumers — the blob client here and the
+    /// SDK's journal paging — and an app configured for one but not the other
+    /// fails a suite for a reason that looks like a protocol divergence.
+    ///
+    /// Without it `conf-blobs` and `conf-truncation` fail loudly rather than
+    /// silently skipping, which is the behaviour the suite checks for everywhere
+    /// else.
+    pub fn configure(&self, stepd_url: &str, token: &str) {
         *self.blobs.lock().unwrap() = Some(stepd_sdk::Blobs::new(stepd_url, token));
+        if let Some(journal) = self.journal.lock().unwrap().as_ref() {
+            journal.configure(stepd_url, token);
+        }
+    }
+
+    /// Hold the `App`'s journal handle so [`AppState::configure`] can reach it.
+    fn attach_journal(&self, journal: stepd_sdk::journal::JournalSource) {
+        *self.journal.lock().unwrap() = Some(journal);
     }
 
     fn blob_client(&self) -> Option<stepd_sdk::Blobs> {
@@ -707,6 +727,7 @@ pub struct ReferenceApp {
 pub fn app(url: &str, signing_key: Vec<u8>) -> ReferenceApp {
     let state = State::default();
     let app = build(&state, url, signing_key);
+    state.attach_journal(app.journal_handle());
     ReferenceApp { app, state }
 }
 
@@ -895,7 +916,7 @@ pub fn router(reference: ReferenceApp) -> axum::Router {
         .route(
             "/_conformance/configure",
             post(move |axum::Json(c): axum::Json<Configure>| async move {
-                configure_state.configure_blobs(&c.api_base, &c.token);
+                configure_state.configure(&c.api_base, &c.token);
                 axum::Json(serde_json::json!({ "configured": true }))
             }),
         )

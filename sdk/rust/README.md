@@ -57,6 +57,27 @@ Requires Rust **1.85**, for `Waker::noop`: it is what lets
 `#[test]`, with no async runtime. The moment testing a workflow needs ceremony,
 fewer workflows get tested.
 
+## Large journals
+
+A run whose journal outgrows the server's inline ceiling arrives with
+`state_truncated` and only part of its steps. This SDK pages the rest before
+replaying (§8.6), which needs a server address:
+
+```rust
+let app = App::new("billing", url)
+    .signing_key(key)
+    .journal_source("https://stepd.internal", operator_token)
+    .function(/* … */);
+```
+
+Without it such an attempt fails non-retryably, naming the method. That is the
+only safe alternative: replaying against a partial journal re-executes every step
+the app could not see, the run still completes, and nothing errors — the same
+failure mode as an unstable step hash, reached by a different route.
+
+Only runs that reach the ceiling are affected, so an app whose runs stay small
+never needs it.
+
 ## Conformance
 
 This SDK is what the protocol §12 battery drives, through the reference app in
