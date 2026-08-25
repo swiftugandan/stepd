@@ -5,6 +5,10 @@ and an **app** hosting workflow code via an SDK.
 
 Licence: Apache-2.0. Anyone may implement a server or an SDK against this spec.
 
+The bindings live here rather than inside an implementation: both the engine and
+every SDK depend on them, and a contract owned by one of its consumers stops
+being a contract ([ADR-024](../docs/adr/024-language-trees.md)).
+
 ## Contents
 
 | Path | What |
@@ -13,6 +17,7 @@ Licence: Apache-2.0. Anyone may implement a server or an SDK against this spec.
 | `schemas/` | JSON Schema (2020-12) for every message |
 | `examples/` | Valid example payloads, used as fixtures |
 | `validate.py` | Validates examples and negative cases against the schemas |
+| `rust/` | `stepd-proto` — the wire contract as a Rust crate. Its own workspace, depending on nothing; see [`rust/README.md`](rust/README.md) |
 
 ## Schemas
 

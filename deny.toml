@@ -1,5 +1,11 @@
 # Dependency policy for `cargo deny check`.
 #
+# One file at the root, shared by all three Cargo workspaces (`spec/rust`,
+# `sdk/rust`, `engine/rust`), each of which runs
+# `cargo deny --config ../../deny.toml check`. What may be redistributed is a
+# project-wide decision; three copies would be three lists drifting apart, and
+# the one that mattered would be whichever the reviewer did not open.
+#
 # The licence list exists because §3 positions this project against Inngest's
 # SSPL and Restate's BSL. A project that makes that argument should know what
 # it is redistributing, and CI should fail when the answer changes.

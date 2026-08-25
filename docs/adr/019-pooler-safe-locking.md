@@ -95,31 +95,31 @@ Concretely:
 
 ## Verification
 
-* `rust/migrations/0002_engine.sql` — `claim_runs` claims with `FOR UPDATE SKIP
+* `engine/rust/migrations/0002_engine.sql` — `claim_runs` claims with `FOR UPDATE SKIP
   LOCKED`; the header comment states "no advisory locks, so this is safe behind a
   transaction-mode pooler (F-DL-1)". `commit_ops` takes `FOR UPDATE` on the run
   row.
-* `rust/migrations/0006_engine_complete.sql` — `claim_runs_ns` (namespace-scoped,
+* `engine/rust/migrations/0006_engine_complete.sql` — `claim_runs_ns` (namespace-scoped,
   `FOR UPDATE SKIP LOCKED`), `reclaim_expired_leases`, `drain_signals` and
   `fire_due_timers` all use the same pattern with a bounded `LIMIT`;
   `commit_ops` and `resolve_child_result` take `FOR UPDATE` on the run and parent
   rows respectively. The migration header records why signals are relayed rather
   than delivered inline: the lock-ordering deadlock between two runs signalling
   each other.
-* `rust/tests/sql/test_invariants.sql` — the structural assertions. Check 3 fails
+* `engine/rust/tests/sql/test_invariants.sql` — the structural assertions. Check 3 fails
   the build if any `public` function's `prosrc` matches `%pg_advisory%`
   ("advisory lock found; breaks transaction-mode pooling"). Check 15 asserts
   `claim_runs_ns` still contains `SKIP LOCKED` and still filters by namespace.
   Checks 1, 2 and 8 assert the run-row lock is present in `deliver_to_inbox` and
   `commit_ops`, taken *before* the inbox insert and *before* the fence check.
   Check 11 asserts `commit_ops` still relays through `signal_outbox` and never
-  calls `deliver_to_inbox` inline. `rust/tests/sql/test_engine.sql` repeats the
+  calls `deliver_to_inbox` inline. `engine/rust/tests/sql/test_engine.sql` repeats the
   advisory-lock scan as assertion R2.
-* `rust/crates/stepd-cli/src/doctor.rs` — `structural_invariants` runs the same
+* `engine/rust/crates/stepd-cli/src/doctor.rs` — `structural_invariants` runs the same
   three checks against a live database, so a schema migrated by hand or restored
   from an older dump is caught before it silently loses a signal; a further check
   reports a detected pgbouncer-style pooler and states that it is supported.
-  `rust/crates/stepd-store-postgres/src/lib.rs` records the constraint as a
+  `engine/rust/crates/stepd-store-postgres/src/lib.rs` records the constraint as a
   standing rule for the crate.
 * **Not verified:** PRD F-DL-1 requires a CI lane running the full battery through
   pgbouncer in transaction mode. There is no CI configuration in this repository

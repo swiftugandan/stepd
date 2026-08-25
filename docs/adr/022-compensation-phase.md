@@ -133,7 +133,7 @@ each get their phase without the parent having to know the shape of the tree.
 
 ## Verification
 
-Migration `rust/migrations/0010_compensation.sql`.
+Migration `engine/rust/migrations/0010_compensation.sql`.
 
 | Claim | Evidence |
 |---|---|

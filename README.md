@@ -19,12 +19,30 @@ memoisation, plus Restate-style keyed single-writer ordering, on Postgres.
 
 ## Layout
 
+Role at the top, language underneath.
+
 ```
-spec/        Wire protocol, JSON Schemas, validator
-rust/        The implementation: eleven crates, migrations, SQL test suites
-docs/        BRD, PRD, gap register, SDK design, ADRs, runbooks
-reference/   Python reference implementation — kept as an independent model
+spec/           The protocol: PROTOCOL.md, JSON Schemas, validator
+  rust/           stepd-proto — the wire contract as a crate
+sdk/            What a workflow author imports
+  rust/           stepd-sdk, stepd-sdk-core
+engine/         The server: ingest, storage, dispatch, console, CLI
+  rust/           eight crates, migrations, SQL test suites
+docs/           BRD, PRD, gap register, SDK design, ADRs, runbooks
+reference/      Python reference implementation — kept as an independent model
 ```
+
+Three Cargo workspaces, not one. `spec/rust` depends on nothing;
+`sdk/rust` depends on `spec/rust` and stops there; `engine/rust` depends on both.
+That last edge runs in the direction it reads: the engine implements the
+protocol, and consumes the SDK in exactly two places — the conformance
+battery's bundled reference app, and the server's end-to-end test, which is a
+dev-dependency.
+
+The split is what makes "a workflow author's process contains no engine" a
+checkable claim rather than a diagram. `cd sdk/rust && cargo build` succeeds
+with only `spec/rust` beside it, and CI greps the SDK's dependency tree for
+engine crates ([ADR-024](docs/adr/024-language-trees.md)).
 
 ## Status
 
@@ -50,7 +68,7 @@ reference/   Python reference implementation — kept as an independent model
 
 **A five-step workflow runs from an ingested event to a completed run**, through
 the real dispatcher, a real SDK app on a real socket, over signed HTTP, against
-PostgreSQL 16 — `rust/crates/stepd-server/tests/end_to_end.rs`.
+PostgreSQL 16 — `engine/rust/crates/stepd-server/tests/end_to_end.rs`.
 
 ## Known gaps
 
@@ -90,7 +108,7 @@ createdb -p 5433 -U postgres stepd_sql
 createdb -p 5433 -U postgres stepd_rust
 
 # ---- the engine SQL: behaviour and structural invariants
-cd rust
+cd engine/rust
 SQLDB="postgres://postgres@127.0.0.1:5433/stepd_sql"
 for f in migrations/*.sql; do psql "$SQLDB" -v ON_ERROR_STOP=1 -q -f "$f"; done
 psql "$SQLDB" -v ON_ERROR_STOP=1 -q \
@@ -154,7 +172,7 @@ because the green tick is then a lie about the thing most likely to break.
 ### Running the server
 
 ```bash
-cd rust
+cd engine/rust
 cargo run -p stepd-cli -- dev            # migrations, a namespace, a token, a console
 cargo run -p stepd-cli -- doctor         # thirteen checks; non-zero exit on anything critical
 ```
@@ -312,7 +330,7 @@ and skipped counts, and — if the sweep gave up on a schedule — why.
 | | |
 |---|---|
 | `spec/PROTOCOL.md` | The wire protocol. The thing a third party implements against — §12 now says what they must expose for the battery to run. |
-| `docs/adr/` | Twenty-three ADRs. Start with 011, 012 and 019 — the silent-corruption ones. ADR-016 records what building cron taught about ADR-016; 021 and 022 what the conformance suite found. |
+| `docs/adr/` | Twenty-four ADRs. Start with 011, 012 and 019 — the silent-corruption ones; 024 is why the tree is laid out as it is. ADR-016 records what building cron taught about ADR-016; 021 and 022 what the conformance suite found. |
 | `docs/runbooks/restore-hazard.md` | **Read before you need it.** A point-in-time restore re-executes side effects — and re-fires cron occurrences, which is section 3a. |
 | `docs/runbooks/` | Stuck runs, backlog, poison pills, upgrades. |
 | `docs/RECONCILIATION.md` | What was wrong with the archived tree, what was done, and §7 — the findings worth carrying forward. |

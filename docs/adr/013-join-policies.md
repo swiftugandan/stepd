@@ -43,7 +43,7 @@ run — the handler must read it and decide explicitly; sibling cancellation und
 cancellation mechanism rather than two (ADR-014); retrying one op does not re-dispatch the
 whole batch; and a batch carries exactly one policy, mixing being rejected.
 
-In `rust/crates/stepd-sdk-core/src/join.rs`, `group_outcome` implements the `all_settled` shape
+In `sdk/rust/crates/stepd-sdk-core/src/join.rs`, `group_outcome` implements the `all_settled` shape
 on the handler side. A genuine failure outranks a yield, so the handler sees the error rather
 than being replayed into the same failing step forever; a yield with no failure becomes
 `Halt::Yield(0)`, because ops accumulate on the `Ctx` rather than travelling in the halt value
@@ -89,7 +89,7 @@ and silently numbering them makes a real bug look like it works until the loop's
   test harness's assertions are the mitigation; the type system is not (a failed step surfaces
   as `Err`, so `?` propagates it, but `.unwrap_or_default()` does not).
 * **`all` and `any` are specified but not yet enforced by the engine.** `commit_ops` in
-  `rust/migrations/0006_engine_complete.sql` accepts `p_join text DEFAULT 'all_settled'` and
+  `engine/rust/migrations/0006_engine_complete.sql` accepts `p_join text DEFAULT 'all_settled'` and
   never reads it; the wake rule it implements is `all_settled` and only that — a run is
   requeued when no `run_steps` row for it is still `pending`. An SDK sending `join: "any"`
   today gets `all_settled` behaviour with no error. This is a known gap, not a subtlety, and
@@ -107,20 +107,20 @@ and silently numbering them makes a real bug look like it works until the loop's
 
 ## Verification
 
-* `rust/crates/stepd-sdk-core/src/join.rs` — `group_outcome`, whose doc comment states the
+* `sdk/rust/crates/stepd-sdk-core/src/join.rs` — `group_outcome`, whose doc comment states the
   rule: returning early on first failure "would leave siblings that had already executed
   unrecorded, which is the one thing a durable engine must never do". `JoinAll::poll` drives
   every member to `Ready` before the outcome is computed.
-* `rust/crates/stepd-sdk-core/src/tests.rs` —
+* `sdk/rust/crates/stepd-sdk-core/src/tests.rs` —
   `a_duplicate_id_is_rejected_before_any_member_runs` (zero closures executed, so the one
   short-circuiting path cannot lose work), `a_duplicate_id_inside_a_parallel_group_is_fatal`
   (`protocol_violation`, non-retryable),
   `a_parallel_group_emits_one_envelope_and_each_member_runs_once` (two attempts, not one per
   member), and `join_all_handles_a_fan_out_with_discriminated_ids`.
-* `rust/tests/sql/test_engine_ops.sql` — the `parallel batch` block commits a `sleep` and a
+* `engine/rust/tests/sql/test_engine_ops.sql` — the `parallel batch` block commits a `sleep` and a
   `wait_event` in one envelope, delivers the event, and asserts the run stays parked while the
   sibling is pending, then resumes only once every op has settled. This is the engine-side
   `all_settled` wake rule.
-* `rust/migrations/0006_engine_complete.sql` — `deliver_to_inbox` returns without requeueing
+* `engine/rust/migrations/0006_engine_complete.sql` — `deliver_to_inbox` returns without requeueing
   while any `run_steps` row is still `pending`: "a run that waited and slept in one parallel
   batch must not wake with the sleep still pending".

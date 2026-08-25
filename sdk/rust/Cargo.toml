@@ -1,0 +1,45 @@
+# The Rust SDK.
+#
+# Its own workspace, and that is a checkable claim rather than a filing
+# decision: `cd sdk/rust && cargo build` succeeds without any part of the
+# engine on disk. The dependency graph reaches `stepd-proto` — the published
+# contract — and stops. A workflow author's process contains no engine, and a
+# build here fails the moment that stops being true.
+[workspace]
+resolver = "2"
+members = [
+  "crates/stepd-sdk-core",
+  "crates/stepd-sdk",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/stepd-dev/stepd"
+rust-version = "1.85"   # Waker::noop, used by the test harness so a workflow test needs no runtime
+
+[workspace.dependencies]
+stepd-proto    = { path = "../../spec/rust/crates/stepd-proto", version = "0.1.0" }
+stepd-sdk-core = { path = "crates/stepd-sdk-core", version = "0.1.0" }
+stepd-sdk      = { path = "crates/stepd-sdk", version = "0.1.0" }
+
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid       = { version = "1", features = ["v4", "v7", "serde"] }
+chrono     = { version = "0.4", features = ["serde"] }
+thiserror  = "1"
+tracing    = "0.1"
+tokio      = { version = "1", features = ["full"] }
+axum       = "0.8"
+sha2       = "0.10"
+hmac       = "0.12"
+hex        = "0.4"
+subtle     = "2"
+reqwest    = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+rand       = "0.8"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

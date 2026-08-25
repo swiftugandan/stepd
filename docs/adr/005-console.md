@@ -33,7 +33,7 @@ implemented; the SSE half is affected, and is under "What we accept".
 
 The console is a **single self-contained HTML file**, `assets/console.html`
 (383 lines, ~17 KB), compiled into the binary with `include_str!` in
-`rust/crates/stepd-server/src/console.rs`. No bundler, no `rust-embed`, no asset
+`engine/rust/crates/stepd-server/src/console.rs`. No bundler, no `rust-embed`, no asset
 directory, no npm in the build. `cargo build` produces the whole product.
 
 It is served under a **nonce-based strict CSP**. Each response mints 128 bits of
@@ -104,7 +104,7 @@ URL itself a credential.
 
 ## Verification
 
-* `rust/crates/stepd-server/src/console.rs` holds the decision and its tests.
+* `engine/rust/crates/stepd-server/src/console.rs` holds the decision and its tests.
   `the_console_is_compiled_into_the_binary` asserts the embedded string contains
   `<title>stepd console</title>` and exceeds 5,000 bytes, so a truncated asset fails
   the build rather than serving a blank page with a 200.
@@ -118,7 +118,7 @@ URL itself a credential.
 * `the_console_page_is_never_cached` asserts `cache-control: no-store` and
   `referrer-policy: no-referrer`, the two headers that keep the token-bearing URL
   out of shared caches and `Referer` headers.
-* `rust/crates/stepd-server/tests/end_to_end.rs::the_console_is_served_with_a_strict_csp`
+* `engine/rust/crates/stepd-server/tests/end_to_end.rs::the_console_is_served_with_a_strict_csp`
   repeats the check over real HTTP against a running server, asserting a 200, a CSP
   with `script-src 'nonce-` and without `script-src 'unsafe-inline'`, and a body
   containing `stepd console`.

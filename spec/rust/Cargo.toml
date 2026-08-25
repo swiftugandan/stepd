@@ -1,0 +1,33 @@
+# The protocol, in Rust.
+#
+# This workspace holds one crate and depends on nothing in the repository. That
+# is the point: `stepd-proto` is the wire contract, and both an engine and an
+# SDK implement against it. It sits beside `PROTOCOL.md` and `schemas/` rather
+# than inside either implementation, because a shared contract owned by one of
+# its consumers stops being a contract.
+[workspace]
+resolver = "2"
+members = ["crates/stepd-proto"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/stepd-dev/stepd"
+rust-version = "1.85"
+
+[workspace.dependencies]
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid       = { version = "1", features = ["v4", "v7", "serde"] }
+chrono     = { version = "0.4", features = ["serde"] }
+thiserror  = "1"
+sha2       = "0.10"
+hmac       = "0.12"
+hex        = "0.4"
+subtle     = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,16 +1,21 @@
-# The build context is the repo root but only `rust/` is copied. Excluding the
-# rest keeps the context small; excluding rust/target keeps a host build from
-# being shipped into the image, where its absolute paths and host glibc are
-# wrong anyway.
+# The build context is the repo root; three trees are copied — `spec/rust`,
+# `sdk/rust` and `engine/rust` — because `engine/rust` path-depends on the
+# other two. Excluding the rest keeps the context small; excluding the target
+# directories keeps a host build from being shipped into the image, where its
+# absolute paths and host glibc are wrong anyway.
+#
+# Note `spec/` is NOT excluded wholesale: `spec/rust` holds `stepd-proto`, and
+# every crate in the tree depends on it. Its non-Rust parts are markdown, JSON
+# fixtures and a virtualenv, all covered by the patterns below.
 .git
 .github
 .claude
 docs
-spec
 reference
-rust/target
+**/target
 **/*.md
 **/.venv
 **/__pycache__
+**/node_modules
 .env
 .env.*

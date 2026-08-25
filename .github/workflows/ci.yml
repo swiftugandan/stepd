@@ -41,18 +41,32 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust
+          workspaces: |
+            spec/rust
+            sdk/rust
+            engine/rust
       - name: format
-        run: cargo fmt --all --check
-        working-directory: rust
+        run: |
+          for w in spec/rust sdk/rust engine/rust; do
+            (cd "$w" && cargo fmt --all --check)
+          done
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-        working-directory: rust
+        run: |
+          for w in spec/rust sdk/rust engine/rust; do
+            (cd "$w" && cargo clippy --workspace --all-targets -- -D warnings)
+          done
       - name: unit tests
-        # No STEPD_TEST_DATABASE_URL: the database-backed tests skip loudly, and
-        # this lane is about the logic that needs nothing running.
-        run: cargo test --workspace --lib
-        working-directory: rust
+        # `spec/rust` and `sdk/rust` need nothing running, so their whole suites
+        # belong in this tier rather than tier 2 — a workflow author's feedback
+        # loop should not have to wait on a database they do not use.
+        #
+        # For the engine, still no STEPD_TEST_DATABASE_URL: the database-backed
+        # tests skip loudly, and this lane is about the logic that needs nothing
+        # running.
+        run: |
+          (cd spec/rust   && cargo test --workspace)
+          (cd sdk/rust    && cargo test --workspace)
+          (cd engine/rust && cargo test --workspace --lib)
 
   # ---------------------------------------------------------------- boundaries
   boundaries:
@@ -64,7 +78,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust
+          workspaces: |
+            spec/rust
+            sdk/rust
+            engine/rust
       - name: stepd-proto has no runtime, no I/O, no database
         # The load-bearing constraint: it is what lets a third party build an
         # alternative server or SDK against the published spec without
@@ -74,7 +91,18 @@ jobs:
           cargo tree -p stepd-proto --edges normal --prefix none \
             | grep -Ei '^(tokio|sqlx|axum|reqwest|hyper) ' \
             && { echo "stepd-proto gained a runtime or I/O dependency"; exit 1; } || true
-        working-directory: rust
+        working-directory: spec/rust
+      - name: the SDK's dependency graph contains no engine
+        # `sdk/rust` is a separate workspace so this is checkable rather than
+        # aspirational. `cargo build` proves the workspace resolves with only
+        # `spec/rust` beside it; the grep names the crates it must never reach
+        # for, because a build succeeding says nothing about what it pulled in.
+        run: |
+          cargo build --workspace --locked
+          cargo tree --workspace --edges normal --prefix none \
+            | grep -E '^stepd-(core|store-postgres|server|transport-http|expr-cel|blobs-s3|conformance|cli) ' \
+            && { echo "the SDK gained a dependency on the engine"; exit 1; } || true
+        working-directory: sdk/rust
       - name: stepd-core names no concrete backend
         # The moment the engine reaches for sqlx directly, swapping a backing
         # service stops being a new crate and becomes a rewrite.
@@ -82,12 +110,17 @@ jobs:
           cargo tree -p stepd-core --edges normal --prefix none \
             | grep -Ei '^(sqlx|reqwest|axum) ' \
             && { echo "stepd-core gained a backend dependency"; exit 1; } || true
-        working-directory: rust
+        working-directory: engine/rust
       - name: install cargo-deny
         run: cargo install cargo-deny --locked
       - name: licences and advisories
-        run: cargo deny check
-        working-directory: rust
+        # One policy at the root, three workspaces checked against it. What this
+        # project redistributes is a project-wide decision; three copies would be
+        # three lists drifting apart.
+        run: |
+          for w in spec/rust sdk/rust engine/rust; do
+            (cd "$w" && cargo deny --config ../../deny.toml check)
+          done
 
   # ---------------------------------------------------------------- tier 2
   integration:
@@ -111,7 +144,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust
+          workspaces: |
+            spec/rust
+            sdk/rust
+            engine/rust
 
       - name: protocol schemas
         # In a virtualenv, and pinned. ubuntu-latest ships jsonschema 4.10 in
@@ -136,18 +172,18 @@ jobs:
         run: |
           psql "$STEPD_TEST_DATABASE_URL" -c 'CREATE DATABASE stepd_sql'
           SQLDB="${STEPD_TEST_DATABASE_URL%/*}/stepd_sql"
-          for f in rust/migrations/*.sql; do
+          for f in engine/rust/migrations/*.sql; do
             psql "$SQLDB" -v ON_ERROR_STOP=1 -q -f "$f"
           done
           psql "$SQLDB" -v ON_ERROR_STOP=1 -q \
-            -f rust/tests/sql/test_engine.sql \
-            -f rust/tests/sql/test_engine_ops.sql \
-            -f rust/tests/sql/test_cron.sql \
-            -f rust/tests/sql/test_invariants.sql
+            -f engine/rust/tests/sql/test_engine.sql \
+            -f engine/rust/tests/sql/test_engine_ops.sql \
+            -f engine/rust/tests/sql/test_cron.sql \
+            -f engine/rust/tests/sql/test_invariants.sql
 
       - name: live-database and end-to-end tests
         run: cargo test --workspace
-        working-directory: rust
+        working-directory: engine/rust
 
       - name: conformance battery against the reference app
         # PRD T2 requires this lane. It is separate from `cargo test --workspace`
@@ -161,7 +197,7 @@ jobs:
         # test asserts there are none left — so a suite added to the protocol
         # fails this lane until somebody writes it.
         run: cargo test -p stepd-conformance --test battery -- --nocapture
-        working-directory: rust
+        working-directory: engine/rust
 
   # ---------------------------------------------------------------- tier 3
   pooler:
@@ -211,12 +247,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust
+          workspaces: |
+            spec/rust
+            sdk/rust
+            engine/rust
       - name: run the suite through the pooler
         # The engine's own migrate step runs through the pooler too. DDL through
         # a transaction-mode pooler is the part most likely to be surprising, so
         # it is worth exercising rather than routing around.
-        run: cd rust && cargo test --workspace
+        run: cd engine/rust && cargo test --workspace
 
   # ---------------------------------------------------------------- tier 3
   simulation:
@@ -241,10 +280,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust
+          workspaces: |
+            spec/rust
+            sdk/rust
+            engine/rust
       - name: Rust simulation against the real engine
         run: cargo test --release -p stepd-store-postgres --test simulation
-        working-directory: rust
+        working-directory: engine/rust
       - name: Python simulation against the model
         # Both are kept. The model finds design gaps — it found A8 on its first
         # run — and the Rust harness finds implementation gaps. Neither
@@ -278,9 +320,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust
+          workspaces: |
+            spec/rust
+            sdk/rust
+            engine/rust
       - run: cargo test --release -p stepd-store-postgres --test simulation
-        working-directory: rust
+        working-directory: engine/rust
       - name: report seeds per finding
         # Tracked as an efficiency metric (PRD §10.5): a seed budget that grows
         # without finding anything is a budget to spend somewhere else.

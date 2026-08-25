@@ -36,7 +36,7 @@ and the person debugging it has no thread to pull.
 outside it at *compile* time, with a message naming the construct.
 
 The supported surface is tabulated in the crate's module documentation
-(`rust/crates/stepd-expr-cel/src/lib.rs`): literals; the `event`, `events`, `run`
+(`engine/rust/crates/stepd-expr-cel/src/lib.rs`): literals; the `event`, `events`, `run`
 and `now` bindings; field access and indexing; comparison; boolean logic;
 arithmetic including string concatenation; membership; the conditional operator;
 and a fixed function list (`string`, `int`, `double`, `bool`, `size`, `has`,
@@ -88,7 +88,7 @@ returns the error so the health warning has something to report.
 * **The rejection happens later than the crate documentation claims.** The module
   header says an unsupported expression is rejected "at registration time, where a
   developer sees it". It is not: `register` in
-  `rust/crates/stepd-server/src/registry.rs` stores the manifest without compiling
+  `engine/rust/crates/stepd-server/src/registry.rs` stores the manifest without compiling
   any expression, and the only `compile` call sites are `trigger_matches` and
   `evaluate_key` on the ingest path, where a failure is a `warn!` log and a
   non-match. The refusal is real and it is by name, but today it surfaces in server
@@ -110,7 +110,7 @@ returns the error so the health warning has something to report.
 ## Verification
 
 * `an_unsupported_construct_is_rejected_at_compile_time_by_name` in
-  `rust/crates/stepd-expr-cel/src/lib.rs` compiles `all`, `exists`, `map` and
+  `engine/rust/crates/stepd-expr-cel/src/lib.rs` compiles `all`, `exists`, `map` and
   `filter` expressions and asserts each error both names the macro and says "not
   supported" — the property this ADR is about.
 * `the_protocols_own_examples_evaluate` asserts every expression appearing in
@@ -127,6 +127,6 @@ returns the error so the health warning has something to report.
   smoke check against the 1 ms budget, present to catch an accidental O(n²) rewrite
   rather than to benchmark.
 * The end-to-end path uses a real expression: the fixture in
-  `rust/crates/stepd-server/tests/end_to_end.rs` registers `order-fulfilment` with
+  `engine/rust/crates/stepd-server/tests/end_to_end.rs` registers `order-fulfilment` with
   `.key("'order:' + string(event.data.order_id)")`, exercised by
   `an_event_drives_a_real_sdk_workflow_to_completion`.

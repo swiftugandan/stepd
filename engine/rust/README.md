@@ -1,46 +1,62 @@
-# stepd — the Rust implementation
+# stepd — the engine, in Rust
 
-The crates, the migrations and the SQL suites. The root
-[`README.md`](../README.md) says what the project is and where it is honest
-about not being finished; this file is for working inside `rust/`.
+Ingest, storage, dispatch, the console and the CLI: the crates, the migrations
+and the SQL suites. The root [`README.md`](../../README.md) says what the
+project is and where it is honest about not being finished; this file is for
+working inside `engine/rust/`.
+
+Two things a workflow author wants are **not** here, and that is deliberate
+([ADR-024](../../docs/adr/024-language-trees.md)):
+
+| | |
+|---|---|
+| [`spec/rust`](../../spec/rust) | `stepd-proto` — the wire contract. Its own workspace, because a contract owned by one of its consumers stops being a contract. |
+| [`sdk/rust`](../../sdk/rust) | `stepd-sdk`, `stepd-sdk-core` — what a workflow author imports. Its own workspace, so that "their process contains no engine" is checkable rather than drawn. |
 
 ---
 
 ## The crate graph
 
 Dependency order, bottom first. Nothing below depends on anything above it, and
-that is the property worth preserving when adding code — `stepd-proto` and
-`stepd-sdk-core` in particular are async-free and I/O-free on purpose.
+that is the property worth preserving when adding code. Crates from the sibling
+workspaces are marked; everything else is in this one.
 
 ```
-  stepd-cli                          the `stepd` binary
-      └── stepd-conformance          the §12 battery and the reference app
-              └── stepd-server       ingest/management API, console, loops
-                      │
-      ┌───────────────┼───────────────┬──────────────┐
-  stepd-store-    stepd-transport-  stepd-expr-   stepd-sdk
-   postgres           http             cel            └── stepd-sdk-core
-      └───────────────┴───────────────┘                       │
-                  stepd-core                                  │
-                      └───────────────────────────────────────┴── stepd-proto
+  stepd-cli                              the `stepd` binary
+      └── stepd-conformance              the §12 battery, and the reference app it drives
+              ├── stepd-server           ingest/management API, console, loops
+              │       │
+              │   ┌───┴───────────┬───────────────┬────────────────┐
+              │ stepd-store-  stepd-transport-  stepd-expr-   stepd-blobs-s3
+              │  postgres         http             cel              │
+              │   └───────────────┴───────────────┴────────────────┘
+              │                   stepd-core
+              │                        │
+              └── stepd-sdk  ·········································  sdk/rust
+                      └── stepd-sdk-core  ·····························  sdk/rust
+                                  │       │
+                              stepd-proto  ····························  spec/rust
 ```
 
 Read it bottom-up. `stepd-proto` is the root everything shares; `stepd-core`
-sits above it holding the engine logic; the store, transport and expression
-crates are interchangeable implementations of `core`'s traits; the SDK branch
-reaches `proto` without going through `core` at all, because a workflow author's
-process has no engine in it.
+sits above it holding the engine logic; the store, transport, expression and
+blob crates are interchangeable implementations of `core`'s traits. The SDK
+branch reaches `proto` without going through `core` at all, because a workflow
+author's process has no engine in it — and since the split it is a separate
+workspace, so that stops being a claim and becomes a build failure.
+
+`stepd-conformance` is the one crate depending on both sides, by design: it
+stands up a real server and drives a real SDK app through it. `stepd-server`
+depends on `stepd-sdk` as well, but only under `[dev-dependencies]`, for the
+end-to-end test — the server's runtime graph never touches the SDK.
 
 | Crate | What it owns |
 |---|---|
-| `stepd-proto` | The wire contract. **This is the crate a third party implements against** — no I/O, no runtime, so it can be read as a specification. |
 | `stepd-core` | The engine, generic over storage and transport traits. In-memory fakes for every interface, so the logic is testable without a database. |
 | `stepd-store-postgres` | The Postgres store, plus the simulation harness. Pooler-safe: row-level locking only, never session-scoped advisory locks. |
 | `stepd-blobs-s3` | Blob bytes in an S3-compatible object store. Presigns every transfer and verifies digests from object metadata, so no payload byte crosses the server. Nothing constructs it yet — the server still builds the filesystem backend. |
 | `stepd-expr-cel` | A deliberately partial CEL subset, explicit about what it refuses rather than silently accepting. |
 | `stepd-transport-http` | Signed HTTP push, and the egress policy that stops an app-supplied URL reaching cloud metadata. |
-| `stepd-sdk-core` | The replay machinery. No async, which is what makes the dangerous logic exhaustively testable without scheduling noise. |
-| `stepd-sdk` | What a workflow author touches: `Function`, `Ctx`, the axum adapter, and the in-process test harness. |
 | `stepd-server` | Ingest, management and read API, the operations console, dispatch and convergence loops. |
 | `stepd-cli` | `serve` · `migrate` · `doctor` · `dev` · `token` · `namespace` · `run` · `limits` · `conformance` |
 | `stepd-conformance` | The protocol §12 battery, and the reference app it drives. |
@@ -49,13 +65,15 @@ Every crate carries unit tests against in-memory fakes. On top of those sit the
 lanes that need a live database: the store's own tests, the simulation harness,
 and the end-to-end lane that drives a real SDK app over a real socket.
 
-Requires Rust **1.85** — `Waker::noop`, which is what lets a workflow test run
-with no async runtime at all.
+Requires Rust **1.85**, matching the sibling workspaces. The constraint
+originates in the SDK's test harness (`Waker::noop`, which is what lets a
+workflow test run with no async runtime at all); it is declared here too so the
+three trees share one toolchain.
 
 ## Layout
 
 ```
-crates/            the crates above
+crates/            the eight crates above
 migrations/        applied by `stepd migrate` or by psql — never both
 tests/sql/         suites that run against a hand-migrated database
 ```
@@ -186,7 +204,7 @@ back to `fs`.
   `STEPD_BLOB_S3_PATH_STYLE`. `Config::validate_blob_backend` runs before the
   database connection is opened, so a missing one fails startup naming the
   variable. The relay route is not mounted and `doctor` gains a bucket-reachable
-  check. See [`docs/blob-backends.md`](../docs/blob-backends.md) for which
+  check. See [`docs/blob-backends.md`](../../docs/blob-backends.md) for which
   object stores were observed to enforce the signed upload checksum this backend
   depends on.
 
@@ -230,15 +248,15 @@ code against the design is what found the defect in them:
 * **Eager occurrence claiming.** `ctx.step()` claims when *called*, not when its
   future is *polled*. Claiming at poll time ties the hash to scheduler order, so
   `join!` silently re-executes completed work. See
-  [`docs/SDK-DESIGN-rust.md`](../docs/SDK-DESIGN-rust.md) and the
-  [eager occurrence claiming](../docs/adr/012-eager-occurrence-claiming.md) ADR.
+  [`docs/SDK-DESIGN-rust.md`](../../docs/SDK-DESIGN-rust.md) and the
+  [eager occurrence claiming](../../docs/adr/012-eager-occurrence-claiming.md) ADR.
 * **The commit path.** It lives in SQL, and the Rust store once grew four hundred
   lines that reimplemented it and called none of it — two correctness centres,
   with the tests guarding the one that did not run. See the
-  [durable run inbox](../docs/adr/011-durable-run-inbox.md) and
-  [pooler-safe locking](../docs/adr/019-pooler-safe-locking.md) ADRs.
+  [durable run inbox](../../docs/adr/011-durable-run-inbox.md) and
+  [pooler-safe locking](../../docs/adr/019-pooler-safe-locking.md) ADRs.
 
-[`docs/adr/`](../docs/adr/) holds the decision records; the silent-corruption
+[`docs/adr/`](../../docs/adr/) holds the decision records; the silent-corruption
 ones are eager occurrence claiming, the durable run inbox and pooler-safe
 locking. `docs/runbooks/restore-hazard.md` is the one to read before it is needed:
 a point-in-time restore re-executes side effects and re-fires cron occurrences.

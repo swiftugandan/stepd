@@ -1,22 +1,41 @@
 # CLAUDE.md
 
-Durable workflow engine: Rust workspace in `rust/`, wire protocol in `spec/`.
+Durable workflow engine. Three Cargo workspaces — `spec/rust` (the wire
+contract), `sdk/rust` (what a workflow author imports), `engine/rust` (the
+server) — plus the protocol itself in `spec/`.
 Read [`README.md`](README.md) for status before changing anything, and the
 [`gap`-labelled issues](https://github.com/swiftugandan/stepd/issues?q=is%3Aissue+is%3Aopen+label%3Agap)
 for the known gaps — they live in the tracker, not in the README.
-[`rust/README.md`](rust/README.md) has the crate graph and the test layout.
+[`engine/rust/README.md`](engine/rust/README.md) has the crate graph and the test layout.
 
 ## Commands
 
-All from `rust/` unless stated.
+**Which workspace you are in matters.** `cargo test --workspace` in `engine/rust`
+does not compile the SDK's own tests, and vice versa. CI runs all three; a local
+run that covered one is not a green run.
 
 ```bash
-cargo build --workspace
-cargo test --workspace          # needs STEPD_TEST_DATABASE_URL (see below)
-cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
+# the engine — needs STEPD_TEST_DATABASE_URL for the full suite (see below)
+cd engine/rust
+cargo test --workspace
 cargo run -p stepd-cli -- dev       # server + console, migrations, a token
 cargo run -p stepd-cli -- doctor    # non-zero exit on anything critical
+
+# the SDK and the protocol — no database, no server, seconds
+(cd sdk/rust  && cargo test --workspace)
+(cd spec/rust && cargo test --workspace)
+
+# all three, as CI does
+for w in spec/rust sdk/rust engine/rust; do
+  (cd "$w" && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings)
+done
 ```
+
+**Do not make `sdk/rust` depend on the engine.** It is a separate workspace so
+that `cd sdk/rust && cargo build` failing is what tells you the SDK has grown an
+engine dependency; CI also greps its dependency tree. `spec/rust` holds
+`stepd-proto` because a contract owned by one of its consumers stops being a
+contract — see [ADR-024](docs/adr/024-language-trees.md).
 
 Protocol schemas, from `spec/` — needs a recent `jsonschema` in a virtualenv,
 because the system package is older, lacks the `registry=` argument the
@@ -56,7 +75,7 @@ that skipped them is not a green run.
   work. Same rule for `wait_event` and `invoke`. See
   [`docs/SDK-DESIGN-rust.md`](docs/SDK-DESIGN-rust.md) and the
   [eager occurrence claiming](docs/adr/012-eager-occurrence-claiming.md) ADR.
-- **The commit path lives in SQL.** `rust/tests/sql/test_invariants.sql` fails the
+- **The commit path lives in SQL.** `engine/rust/tests/sql/test_invariants.sql` fails the
   build if a serialization point moves. Don't reimplement commit logic in the
   Rust store — a second correctness centre is where live defects hid while the
   tests guarded the first.
@@ -87,7 +106,7 @@ say which issue a change closes.
 | | |
 |---|---|
 | [`README.md`](README.md) | Status, how to run it, and how to write a workflow |
-| [`rust/README.md`](rust/README.md) | Crate graph, test layout, running the server |
+| [`engine/rust/README.md`](engine/rust/README.md) | Crate graph, test layout, running the server |
 | [`spec/PROTOCOL.md`](spec/PROTOCOL.md) | The wire protocol |
 | [`docs/adr/`](docs/adr/) | ADRs; the silent-corruption ones are eager occurrence claiming, the durable run inbox and pooler-safe locking |
 | [`docs/runbooks/restore-hazard.md`](docs/runbooks/restore-hazard.md) | Read before you need it: PITR re-executes side effects |

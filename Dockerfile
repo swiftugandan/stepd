@@ -15,15 +15,20 @@
 FROM rust:1-bookworm AS build
 WORKDIR /src
 
-# The whole workspace: stepd-cli depends on eight sibling crates by path, so a
-# partial copy fails to resolve rather than building less.
-COPY rust/ ./
+# Three workspaces, in the repository's own layout. `engine/rust` path-depends
+# on `../../spec/rust` (the protocol) and `../../sdk/rust` (the conformance
+# battery's reference app), so the relative arrangement has to be preserved
+# here — a flattened copy fails to resolve rather than building less.
+COPY spec/rust/   spec/rust/
+COPY sdk/rust/    sdk/rust/
+COPY engine/rust/ engine/rust/
+WORKDIR /src/engine/rust
 
 # Cache mounts rather than a dependency-only pre-build: the registry and the
 # target directory survive between builds, and the binary is copied out inside
 # the same RUN because a cache mount is not present in the resulting layer.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
+    --mount=type=cache,target=/src/engine/rust/target \
     cargo build --release -p stepd-cli && \
     cp target/release/stepd /usr/local/bin/stepd
 

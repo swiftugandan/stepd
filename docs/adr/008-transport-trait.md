@@ -27,11 +27,11 @@ own cloud credentials behind it.
 ## Decision
 
 **Delivery is a trait with one method** — `deliver(&AppTarget, &Attempt) -> Result<AttemptResponse, Error>`
-in `rust/crates/stepd-core/src/traits.rs`. Everything transport-specific lives below it. The
+in `engine/rust/crates/stepd-core/src/traits.rs`. Everything transport-specific lives below it. The
 dispatcher knows only `Attempt` in, `AttemptResponse` or `Error` out; it holds the retry
 policy, the circuit breaker and the fencing check, none of which mention HTTP.
 
-**v1 ships signed HTTP push.** `HttpTransport` (`rust/crates/stepd-transport-http/src/lib.rs`)
+**v1 ships signed HTTP push.** `HttpTransport` (`engine/rust/crates/stepd-transport-http/src/lib.rs`)
 signs with HMAC-SHA256 over `"<ts>.<nonce>.<body>"` (`stepd-proto/src/sig.rs`), sends the
 protocol, run, attempt and fence headers, and maps each status the protocol gives a distinct
 meaning (§2.2) onto a distinct engine outcome — `409` to `Error::StaleFence`, `400` to a
@@ -109,16 +109,16 @@ identical in both directions of initiation; only who opens the socket differs.
 
 ## Verification
 
-* `rust/crates/stepd-transport-http/src/lib.rs`, test
+* `engine/rust/crates/stepd-transport-http/src/lib.rs`, test
   `cloud_metadata_is_denied_even_when_private_ranges_are_allowed`: both the IPv4 and IPv6
   metadata addresses are refused with `allow_private` and `allow_loopback` on.
 * Same file: `link_local_loopback_and_private_are_denied_by_default`,
   `a_public_address_is_allowed`, `development_mode_opens_only_what_it_says`,
   `only_http_and_https_are_dereferenced`, `a_loopback_url_is_refused_under_the_default_policy`,
   `the_allowlist_overrides_the_range_rules`, `the_transport_refuses_to_follow_redirects`.
-* `rust/crates/stepd-core/src/traits.rs`: `Transport` names one method and no HTTP type;
+* `engine/rust/crates/stepd-core/src/traits.rs`: `Transport` names one method and no HTTP type;
   `dispatcher.rs` is generic over `T: Transport`, exercised against `MemTransport` in
-  `rust/crates/stepd-core/tests/engine.rs`.
-* `rust/crates/stepd-server/src/registry.rs`: `register` calls `policy().resolve(&manifest.url)`
+  `engine/rust/crates/stepd-core/tests/engine.rs`.
+* `engine/rust/crates/stepd-server/src/registry.rs`: `register` calls `policy().resolve(&manifest.url)`
   and returns an `egress_denied` problem before any row is written.
-* `rust/crates/stepd-server/src/lib.rs`, test `the_default_egress_policy_fails_closed`.
+* `engine/rust/crates/stepd-server/src/lib.rs`, test `the_default_egress_policy_fails_closed`.

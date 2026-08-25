@@ -10,7 +10,7 @@
 //! problems that no test would have caught.
 //!
 //! The first is that the project's structural invariant tests
-//! (`rust/tests/sql/test_invariants.sql`) assert properties of the *SQL
+//! (`engine/rust/tests/sql/test_invariants.sql`) assert properties of the *SQL
 //! functions* — that `deliver_to_inbox` takes the run row lock as its first
 //! statement, that `commit_ops` checks the fence under that lock. A second
 //! implementation in Rust is covered by none of them, so the countermeasure to

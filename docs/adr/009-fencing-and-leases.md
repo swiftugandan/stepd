@@ -31,8 +31,8 @@ and then writes races the reclaim that happened in between.
 ## Decision
 
 **Every run carries a monotonic `fence_token`, and claiming bumps it.**
-`runs.fence_token bigint NOT NULL DEFAULT 0` (`rust/migrations/0001_initial.sql`).
-`claim_runs_ns` (`rust/migrations/0006_engine_complete.sql`) selects claimable queue rows
+`runs.fence_token bigint NOT NULL DEFAULT 0` (`engine/rust/migrations/0001_initial.sql`).
+`claim_runs_ns` (`engine/rust/migrations/0006_engine_complete.sql`) selects claimable queue rows
 with `FOR UPDATE SKIP LOCKED`, marks them `claimed_by`/`claimed_until`, and in the same
 statement sets `fence_token = fence_token + 1`, `attempt_no = attempt_no + 1`,
 `lease_owner`, `lease_until` and `status = 'running'` — one statement, so there is no window
@@ -104,7 +104,7 @@ backlog starve every other however the caller sequences its calls (F-LP-5).
 
 ## Verification
 
-* `rust/crates/stepd-store-postgres/tests/live.rs`, `a_superseded_attempt_cannot_commit`:
+* `engine/rust/crates/stepd-store-postgres/tests/live.rs`, `a_superseded_attempt_cannot_commit`:
   claims a run, releases it, reclaims it as a second worker, asserts `second.fence >
   first.fence`, then commits at the *old* fence and asserts `CommitOutcome::StaleFence` —
   and separately that `steps_page` is empty, so a stale attempt wrote nothing at all. The
@@ -112,14 +112,14 @@ backlog starve every other however the caller sequences its calls (F-LP-5).
 * Same file, `an_expired_lease_returns_its_run_to_the_queue`: a worker claims with a 1 ms
   lease and dies; nobody else can claim until `reclaim_expired_leases` runs, and the retaken
   lease carries a higher fence.
-* `rust/tests/sql/test_invariants.sql`, assertion 8: fails the build if
+* `engine/rust/tests/sql/test_invariants.sql`, assertion 8: fails the build if
   `position('FOR UPDATE') > position('fence_token <> p_fence')` in the `commit_ops` source —
   the countermeasure to the project's own finding that correctness can rest on undocumented
   ordering.
-* `rust/crates/stepd-core/tests/engine.rs`, `stale_fence_response_is_discarded` and
+* `engine/rust/crates/stepd-core/tests/engine.rs`, `stale_fence_response_is_discarded` and
   `duplicate_commit_records_a_step_once`: the same property against in-memory doubles.
-* `rust/crates/stepd-store-postgres/tests/simulation.rs`, property **P6** (fence
+* `engine/rust/crates/stepd-store-postgres/tests/simulation.rs`, property **P6** (fence
   monotonicity): a stale fence never mutates state, asserted under injected faults across
   the seed budget.
-* `rust/crates/stepd-core/src/dispatcher.rs`: `StaleFence` increments `stats.stale` and logs
+* `engine/rust/crates/stepd-core/src/dispatcher.rs`: `StaleFence` increments `stats.stale` and logs
   at debug — an expected outcome, not an error path.

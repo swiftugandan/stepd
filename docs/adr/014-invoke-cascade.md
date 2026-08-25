@@ -27,7 +27,7 @@ on the child. That does not error; it hangs, in a way that looks like a slow dep
 **A full propagation table, enforced limits held in a table rather than in literals, cycle
 rejection at commit time, and a cascade implemented as one recursive SQL statement.**
 
-Propagation (protocol §7.5), implemented in `rust/migrations/0006_engine_complete.sql`:
+Propagation (protocol §7.5), implemented in `engine/rust/migrations/0006_engine_complete.sql`:
 
 | Event | Effect |
 |---|---|
@@ -108,13 +108,13 @@ Two supporting decisions:
 
 ## Verification
 
-* `rust/migrations/0006_engine_complete.sql` — `cascade_cancel`, whose header states why it is
+* `engine/rust/migrations/0006_engine_complete.sql` — `cascade_cancel`, whose header states why it is
   a single statement, and whose `COMMENT ON FUNCTION` records that detached children are
   excluded at every level "including grandchildren reached through a detached parent".
-* `rust/tests/sql/test_invariants.sql` — check 13 fails the build if `cascade_cancel` stops
+* `engine/rust/tests/sql/test_invariants.sql` — check 13 fails the build if `cascade_cancel` stops
   being a single `RECURSIVE` statement or stops excluding detached children; check 12 asserts
   `resolve_child_result` locks the parent row.
-* `rust/tests/sql/test_engine_ops.sql`, `cascade` blocks — an `a → b → c` tree with a detached
+* `engine/rust/tests/sql/test_engine_ops.sql`, `cascade` blocks — an `a → b → c` tree with a detached
   `d`: cancelling `a` cancels the child and the grandchild, leaves `d` pending, and removes all
   three cancelled runs from dispatch. A second block builds `a → (detached) b → c` and asserts
   the subtree *below* a detached child survives with it.

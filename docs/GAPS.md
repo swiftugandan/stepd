@@ -113,16 +113,16 @@ superseded the prototype, the row says so.
 |---|---|---|
 | Dispatch loop (claim → deliver → commit, load protection) | **Implemented and tested end to end** (`reference/dispatcher.py`, 19 assertions, full workflow completes) | M1 |
 | OpenAPI 3.1 management/read API | **Implemented and tested** (`reference/api.py`, 30 assertions, 11 endpoints, `reference/openapi.json`); adversarial namespace-isolation tests included | M1 |
-| Postgres DDL + migrations | **Written, applied and tested against live PostgreSQL 16** (`reference/`, and since superseded by `rust/migrations/`): 25 behavioural + 6 structural assertions, 12-worker concurrency stress, 120 randomised signal races, forced-interleaving test | M1 |
+| Postgres DDL + migrations | **Written, applied and tested against live PostgreSQL 16** (`reference/`, and since superseded by `engine/rust/migrations/`): 25 behavioural + 6 structural assertions, 12-worker concurrency stress, 120 randomised signal races, forced-interleaving test | M1 |
 | Rust SDK design doc (short-circuit control flow — the subtlest code in the project) | **Written, and the SDK built from it**: `docs/SDK-DESIGN-rust.md` and `docs/sdk-prototype/` (property and adversarial tests, an `eager_claim` example), then `stepd-sdk-core` (32 tests) and `stepd-sdk` (30) | M1 |
-| Simulation harness design | **Built**, twice: `reference/simulation.py` against the model and `rust/crates/stepd-store-postgres/tests/simulation.rs` (5 tests) against the real engine; `reference/coverage_check.py` reports never-exercised paths | M0.5 |
+| Simulation harness design | **Built**, twice: `reference/simulation.py` against the model and `engine/rust/crates/stepd-store-postgres/tests/simulation.rs` (5 tests) against the real engine; `reference/coverage_check.py` reports never-exercised paths | M0.5 |
 | Risk-zone ownership map (drives selective test execution) | Specified, not built | M0.5 |
 | Tiered CI configuration with enforced time budgets | **Tiers built, budgets not enforced.** `.github/workflows/ci.yml` has six lanes across tiers 1–4; three name a time budget (`≤10s`, `≤5min`, `≤30min`), one names a cadence (`nightly`), and two — `tier 1 · crate boundaries` and `tier 3 · through pgbouncer` — name neither. Nothing holds a lane to its budget: the `timeout-minutes` guards are 10/10/20/30/40/360, each far above the budget beside it, so they catch a hang and not a lane that has outgrown its tier. PRD §10.2's diff-driven selective execution is absent too — no lane carries a `paths:` filter | M0.5 |
-| ADRs 001–023 | **Written** — 23 files under `docs/adr/` | M0.5 |
-| Console IA and wireframes | **Built and tested** (`reference/console.html`, 17 assertions incl. content-safety audit and the operator flow; the shipped console is `rust/crates/stepd-server/assets/console.html`) | M3 |
+| ADRs 001–024 | **Written** — 24 files under `docs/adr/` | M0.5 |
+| Console IA and wireframes | **Built and tested** (`reference/console.html`, 17 assertions incl. content-safety audit and the operator flow; the shipped console is `engine/rust/crates/stepd-server/assets/console.html`) | M3 |
 | Threat model | Not started | M4 |
 | Operations runbooks (incl. restore hazard) | **Written**: `restore-hazard`, `stuck-run`, `backlog`, `poison-pill`, `upgrade` under `docs/runbooks/`. None has been rehearsed | M4 |
-| Benchmark harness | **Built for the reference implementation** (`reference/bench.py`, against the PRD's ≥1000 commits/s NFR). Nothing benchmarks the Rust engine — no `benches/` anywhere in `rust/` | M4 |
+| Benchmark harness | **Built for the reference implementation** (`reference/bench.py`, against the PRD's ≥1000 commits/s NFR). Nothing benchmarks the Rust engine — no `benches/` anywhere in `engine/rust/` | M4 |
 | Licence, CONTRIBUTING, SECURITY.md, CoC | Licence **applied** (Apache-2.0, `LICENSE` at the root, commit `0d01e75`). The other three do not exist | Public release |
 
 ## Remaining open questions

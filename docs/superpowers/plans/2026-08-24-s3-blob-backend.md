@@ -36,13 +36,13 @@ trait impl" framing, and this plan is shaped by them. Background:
 - **Per-instance state never goes in a `static`.** (CLAUDE.md; three independent
   recurrences.) Backend handles live in `ServerState` / `PostgresBlobStore`.
 - **The commit path lives in SQL.** Do not move blob-reference recording out of
-  the trigger in `rust/migrations/0011_blob_refs.sql`.
+  the trigger in `engine/rust/migrations/0011_blob_refs.sql`.
 - **`cargo deny check` must pass.** `deny.toml` allows only licences something
   already needs. `rusty-s3` is BSD-2-Clause and must be added to `allow` with a
   comment saying which crate requires it, in the same style as the others.
 - **Don't overstate in docs or comments.** (CLAUDE.md.) A comment describing a
   property the code lacks is worse than none.
-- Commands run from `rust/` unless stated. Database tests need
+- Commands run from `engine/rust/` unless stated. Database tests need
   `STEPD_TEST_DATABASE_URL`; without it they skip loudly and the run is not green.
 - Every task ends `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings`
   before the commit. CI sets `RUSTFLAGS: -D warnings`.
@@ -142,10 +142,10 @@ Pure refactor. No behaviour changes, no new configuration, no S3. The existing
 blob tests are the specification: they must pass untouched.
 
 **Files:**
-- Modify: `rust/crates/stepd-core/src/traits.rs` (add the trait after `BlobStore`)
-- Create: `rust/crates/stepd-store-postgres/src/blobs/filesystem.rs`
-- Modify: `rust/crates/stepd-store-postgres/src/blobs.rs`
-- Test: `rust/crates/stepd-store-postgres/src/blobs/filesystem.rs` (`mod tests`)
+- Modify: `engine/rust/crates/stepd-core/src/traits.rs` (add the trait after `BlobStore`)
+- Create: `engine/rust/crates/stepd-store-postgres/src/blobs/filesystem.rs`
+- Modify: `engine/rust/crates/stepd-store-postgres/src/blobs.rs`
+- Test: `engine/rust/crates/stepd-store-postgres/src/blobs/filesystem.rs` (`mod tests`)
 
 **Interfaces:**
 - Produces: `stepd_core::traits::BlobBackend` with
@@ -159,7 +159,7 @@ blob tests are the specification: they must pass untouched.
 - Produces: `stepd_store_postgres::blobs::FilesystemBackend::new(root: PathBuf, caps: Capability) -> Self`.
 
 `read_url` is deliberately **synchronous and infallible-ish**: `attach_read_urls`
-(`rust/crates/stepd-store-postgres/src/lib.rs:374`) walks a journal from a sync
+(`engine/rust/crates/stepd-store-postgres/src/lib.rs:374`) walks a journal from a sync
 context, and SigV4 presigning is pure HMAC with no network, so both backends can
 answer without `await`. Making it async would force that walk async — a much
 larger change that should be argued for, not discovered.
@@ -172,7 +172,7 @@ returns `None`.
 
 - [ ] **Step 1: Write the failing test**
 
-In a new `rust/crates/stepd-store-postgres/src/blobs/filesystem.rs`:
+In a new `engine/rust/crates/stepd-store-postgres/src/blobs/filesystem.rs`:
 
 ```rust
 #[cfg(test)]
@@ -231,7 +231,7 @@ Expected: FAIL, `cannot find type FilesystemBackend`.
 
 - [ ] **Step 3: Add the trait to `stepd-core`**
 
-In `rust/crates/stepd-core/src/traits.rs`, directly after the `BlobStore` block:
+In `engine/rust/crates/stepd-core/src/traits.rs`, directly after the `BlobStore` block:
 
 ```rust
 /// Where a blob's bytes live, and who mints the URLs that reach them.
@@ -404,7 +404,7 @@ test to make it pass, you changed behaviour and this task's premise is broken.
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
-git add rust/crates/stepd-core/src/traits.rs rust/crates/stepd-store-postgres/src/blobs.rs rust/crates/stepd-store-postgres/src/blobs/
+git add engine/rust/crates/stepd-core/src/traits.rs engine/rust/crates/stepd-store-postgres/src/blobs.rs engine/rust/crates/stepd-store-postgres/src/blobs/
 git commit -m "blobs: separate where bytes live from the index that tracks them"
 ```
 
@@ -418,10 +418,10 @@ nothing production calls it. After this task the journal walk goes through the
 backend, so an S3 backend's URLs actually reach attempts.
 
 **Files:**
-- Modify: `rust/crates/stepd-store-postgres/src/lib.rs:129`, `:374`
-- Modify: `rust/crates/stepd-store-postgres/src/blobs.rs` (`attach_read_urls`)
-- Modify: `rust/crates/stepd-server/src/lib.rs:316`
-- Test: `rust/crates/stepd-store-postgres/src/blobs.rs` (`mod tests`)
+- Modify: `engine/rust/crates/stepd-store-postgres/src/lib.rs:129`, `:374`
+- Modify: `engine/rust/crates/stepd-store-postgres/src/blobs.rs` (`attach_read_urls`)
+- Modify: `engine/rust/crates/stepd-server/src/lib.rs:316`
+- Test: `engine/rust/crates/stepd-store-postgres/src/blobs.rs` (`mod tests`)
 
 **Interfaces:**
 - Consumes: `BlobBackend::read_url` from Task 1.
@@ -491,7 +491,7 @@ In `lib.rs`, replace `blob_caps: Option<Arc<Capability>>` with
 
 - [ ] **Step 4: Update the server's wiring**
 
-In `rust/crates/stepd-server/src/lib.rs`, build the `FilesystemBackend` once and
+In `engine/rust/crates/stepd-server/src/lib.rs`, build the `FilesystemBackend` once and
 hand the same `Arc` to both `store.with_blob_backend(..)` and the
 `PostgresBlobStore`. Two backends constructed from the same configuration would
 work today and diverge the moment one takes a different code path — the store
@@ -513,7 +513,7 @@ exercises exactly this path and must still pass unmodified.
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
-git add rust/crates/stepd-store-postgres/src rust/crates/stepd-server/src/lib.rs
+git add engine/rust/crates/stepd-store-postgres/src engine/rust/crates/stepd-server/src/lib.rs
 git commit -m "blobs: mint read URLs through the backend, so presign_read is the code that runs"
 ```
 
@@ -528,9 +528,9 @@ issue's "the relay warning fires only when a store genuinely cannot presign"
 asks for.
 
 **Files:**
-- Modify: `rust/crates/stepd-server/src/blobs.rs:44-52` (`router`), `:184`, `:243`
-- Modify: `rust/crates/stepd-server/src/lib.rs:406`
-- Test: `rust/crates/stepd-server/tests/end_to_end.rs`
+- Modify: `engine/rust/crates/stepd-server/src/blobs.rs:44-52` (`router`), `:184`, `:243`
+- Modify: `engine/rust/crates/stepd-server/src/lib.rs:406`
+- Test: `engine/rust/crates/stepd-server/tests/end_to_end.rs`
 
 **Interfaces:**
 - Consumes: `BlobBackend::can_presign` from Task 1.
@@ -610,7 +610,7 @@ filesystem backend and therefore still have their route.
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
-git add rust/crates/stepd-server
+git add engine/rust/crates/stepd-server
 git commit -m "blobs: mount the relay only where a backend cannot presign (§8.3.2)"
 ```
 
@@ -619,12 +619,12 @@ git commit -m "blobs: mount the relay only where a backend cannot presign (§8.3
 ### Task 4: The S3 backend
 
 **Files:**
-- Create: `rust/crates/stepd-blobs-s3/Cargo.toml`
-- Create: `rust/crates/stepd-blobs-s3/src/lib.rs`
-- Modify: `rust/Cargo.toml` (workspace members, `rusty-s3` and `base64` in
+- Create: `engine/rust/crates/stepd-blobs-s3/Cargo.toml`
+- Create: `engine/rust/crates/stepd-blobs-s3/src/lib.rs`
+- Modify: `engine/rust/Cargo.toml` (workspace members, `rusty-s3` and `base64` in
   `[workspace.dependencies]`)
-- Modify: `rust/deny.toml` (BSD-2-Clause)
-- Test: `rust/crates/stepd-blobs-s3/tests/live.rs`
+- Modify: `engine/rust/deny.toml` (BSD-2-Clause)
+- Test: `engine/rust/crates/stepd-blobs-s3/tests/live.rs`
 
 **Interfaces:**
 - Consumes: `BlobBackend`, `UploadTarget`, `StoredObject` from Task 1.
@@ -778,7 +778,7 @@ move.
 
 - [ ] **Step 5: Check the SDK does not send `content-length` twice**
 
-`PutBuilder::send` (`rust/crates/stepd-sdk/src/blobs.rs`) replays every
+`PutBuilder::send` (`sdk/rust/crates/stepd-sdk/src/blobs.rs`) replays every
 reservation header onto the request, and `reqwest` sets `content-length` itself
 from the body. Against the relay that is harmless — the route reads the body and
 compares lengths. Against a signed request a duplicated or conflicting header is
@@ -868,7 +868,7 @@ Use whichever server Task 0's note says qualifies. If both do, run both.
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
-git add rust/crates/stepd-blobs-s3 rust/Cargo.toml rust/Cargo.lock rust/deny.toml
+git add engine/rust/crates/stepd-blobs-s3 engine/rust/Cargo.toml engine/rust/Cargo.lock engine/rust/deny.toml
 git commit -m "blobs: an S3 backend whose digest check never moves the object"
 ```
 
@@ -877,10 +877,10 @@ git commit -m "blobs: an S3 backend whose digest check never moves the object"
 ### Task 5: Configuration, wiring and doctor
 
 **Files:**
-- Modify: `rust/crates/stepd-server/src/lib.rs` (`Config`, `from_env`, `validate`, `build`)
-- Modify: `rust/crates/stepd-cli/src/doctor.rs:84`, `:316`
+- Modify: `engine/rust/crates/stepd-server/src/lib.rs` (`Config`, `from_env`, `validate`, `build`)
+- Modify: `engine/rust/crates/stepd-cli/src/doctor.rs:84`, `:316`
 - Modify: `.env.example`, `compose.yaml`
-- Test: `rust/crates/stepd-server/src/lib.rs` (`mod tests`)
+- Test: `engine/rust/crates/stepd-server/src/lib.rs` (`mod tests`)
 
 **Interfaces:**
 - Consumes: `S3Backend::new`, `S3Config` (Task 4); `FilesystemBackend` (Task 1).
@@ -961,7 +961,7 @@ cargo run -p stepd-cli -- doctor
 
 ```bash
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
-git add rust/crates/stepd-server/src/lib.rs rust/crates/stepd-cli/src/doctor.rs .env.example compose.yaml
+git add engine/rust/crates/stepd-server/src/lib.rs engine/rust/crates/stepd-cli/src/doctor.rs .env.example compose.yaml
 git commit -m "blobs: select and validate the backend from configuration"
 ```
 
@@ -971,7 +971,7 @@ git commit -m "blobs: select and validate the backend from configuration"
 
 **Files:**
 - Modify: `.github/workflows/ci.yml`
-- Test: `rust/crates/stepd-server/tests/end_to_end.rs`
+- Test: `engine/rust/crates/stepd-server/tests/end_to_end.rs`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1051,7 +1051,7 @@ pre-existing.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add .github/workflows/ci.yml rust/crates/stepd-server/tests/end_to_end.rs
+git add .github/workflows/ci.yml engine/rust/crates/stepd-server/tests/end_to_end.rs
 git commit -m "ci: prove bytes skip the control plane on the S3 backend"
 ```
 
@@ -1087,7 +1087,7 @@ Under *What we accept*, two bullets are now wrong:
   headers **are** used; the filesystem backend still reads locally because it has
   no metadata to consult.
 - "The blob HTTP surface is not yet wired." It has been wired since before this
-  work; both routes exist in `rust/crates/stepd-server/src/blobs.rs`. Delete it.
+  work; both routes exist in `engine/rust/crates/stepd-server/src/blobs.rs`. Delete it.
 
 Also revisit *What this makes easy*: "S3 is a drop-in" was not true and is what
 made this issue look small. Say what it actually took — a seam between the index

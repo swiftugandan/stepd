@@ -1,12 +1,16 @@
+# The engine: ingest, storage, dispatch, the console and the CLI.
+#
+# `stepd-proto` and `stepd-sdk` are path dependencies on sibling trees rather
+# than members here. The protocol is a contract this implements (`spec/rust`),
+# and the SDK is a separate product (`sdk/rust`) that this workspace consumes
+# in exactly two places: the conformance battery's bundled reference app, and
+# the server's end-to-end test. Neither is a runtime dependency of the server.
 [workspace]
 resolver = "2"
 members = [
-  "crates/stepd-proto",
   "crates/stepd-core",
   "crates/stepd-store-postgres",
   "crates/stepd-blobs-s3",
-  "crates/stepd-sdk-core",
-  "crates/stepd-sdk",
   "crates/stepd-expr-cel",
   "crates/stepd-transport-http",
   "crates/stepd-server",
@@ -19,15 +23,16 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/stepd-dev/stepd"
-rust-version = "1.85"   # Waker::noop, used by the SDK test harness so a workflow test needs no runtime
+rust-version = "1.85"
 
 [workspace.dependencies]
-stepd-proto = { path = "crates/stepd-proto", version = "0.1.0" }
+# Sibling trees, not members. See the note above [workspace].
+stepd-proto = { path = "../../spec/rust/crates/stepd-proto", version = "0.1.0" }
+stepd-sdk   = { path = "../../sdk/rust/crates/stepd-sdk",    version = "0.1.0" }
+
 stepd-core  = { path = "crates/stepd-core",  version = "0.1.0" }
 stepd-store-postgres = { path = "crates/stepd-store-postgres", version = "0.1.0" }
 stepd-blobs-s3 = { path = "crates/stepd-blobs-s3", version = "0.1.0" }
-stepd-sdk-core = { path = "crates/stepd-sdk-core", version = "0.1.0" }
-stepd-sdk    = { path = "crates/stepd-sdk",  version = "0.1.0" }
 stepd-server = { path = "crates/stepd-server", version = "0.1.0" }
 stepd-expr-cel = { path = "crates/stepd-expr-cel", version = "0.1.0" }
 stepd-transport-http = { path = "crates/stepd-transport-http", version = "0.1.0" }

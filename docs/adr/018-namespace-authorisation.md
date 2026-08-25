@@ -91,7 +91,7 @@ without ever reading one.
 
 ## Verification
 
-* `rust/crates/stepd-server/src/auth.rs` — `Principal { namespace, role }`
+* `engine/rust/crates/stepd-server/src/auth.rs` — `Principal { namespace, role }`
   extracted per request from the `tokens` table by `token_hash`, filtered on
   `revoked_at IS NULL` and expiry. Unit tests:
   `roles_are_ordered_so_a_single_comparison_expresses_the_rule`,
@@ -100,22 +100,22 @@ without ever reading one.
   `only_the_hash_of_a_token_is_ever_stored` (asserts the digest is 32 bytes and
   does not contain the plaintext), and
   `unknown_roles_do_not_silently_become_viewers`.
-* `rust/crates/stepd-server/src/api.rs` — every handler binds
+* `engine/rust/crates/stepd-server/src/api.rs` — every handler binds
   `principal.namespace` into the query. `list_runs` resolves its keyset cursor
   with `WHERE id = $5 AND ns = $1`; `get_run`, `run_steps`, `resolve_wait`,
   `list_events`, `dead_letter` and `list_functions` are all scoped in SQL;
   `audit()` records every mutation.
-* `rust/crates/stepd-server/src/problem.rs` — `Problem::not_found` carries the
+* `engine/rust/crates/stepd-server/src/problem.rs` — `Problem::not_found` carries the
   reasoning in its doc comment, and `forbidden` is reserved for insufficient
   role. Test: `a_forbidden_resource_is_reported_as_absent`.
-* `rust/crates/stepd-server/tests/end_to_end.rs` —
+* `engine/rust/crates/stepd-server/tests/end_to_end.rs` —
   **`a_token_cannot_see_another_namespace`** mints an admin token in a second
   namespace and asserts `404` on `GET /v1/runs/{id}`, `404` on the cancel command
   ("it must not be cancellable across the boundary"), an *empty* run list rather
   than a filtered one, and that the legitimate token still gets `200`. Alongside
   it: `an_unauthenticated_request_is_refused_but_health_is_not`,
   `a_viewer_can_read_but_not_command`, and `every_command_is_audited`.
-* `rust/tests/sql/test_invariants.sql` — check 15 asserts `claim_runs_ns` still
+* `engine/rust/tests/sql/test_invariants.sql` — check 15 asserts `claim_runs_ns` still
   filters `q.ns = p_ns`; check 6 asserts blob dedupe is `(ns, sha256)` and not
   global, "cross-tenant probing possible" being the failure message.
 * **Not verified:** the end-to-end tests require a live PostgreSQL and skip

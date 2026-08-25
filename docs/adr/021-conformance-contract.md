@@ -151,8 +151,8 @@ specification will be used outside it.
 
 ## Verification
 
-`rust/crates/stepd-conformance`, driven by
-`rust/crates/stepd-conformance/tests/battery.rs` and by `stepd conformance`.
+`engine/rust/crates/stepd-conformance`, driven by
+`engine/rust/crates/stepd-conformance/tests/battery.rs` and by `stepd conformance`.
 
 | Claim | Evidence |
 |---|---|
