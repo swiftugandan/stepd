@@ -27,6 +27,7 @@ spec/           The protocol: PROTOCOL.md, JSON Schemas, validator, fixtures
   typescript/     @stepd/protocol — the same contract in TypeScript
 sdk/            What a workflow author imports
   rust/           stepd-sdk, stepd-sdk-core
+  typescript/     @stepd/sdk-core (the handler and builders are not written yet)
 engine/         The server: ingest, storage, dispatch, console, CLI
   rust/           eight crates, migrations, SQL test suites
 docs/           BRD, PRD, gap register, SDK design, ADRs, runbooks
@@ -53,6 +54,7 @@ engine crates ([ADR-024](docs/adr/024-language-trees.md)).
 | Postgres schema + engine SQL | Complete | 166 behavioural + 27 structural assertions |
 | `stepd-proto` | Complete | 36 tests, plus the cross-language fixtures |
 | `@stepd/protocol` | Complete | 103 tests; agrees with `stepd-proto` on 20 committed vectors |
+| `@stepd/sdk-core` | Complete | 75 tests — the replay machinery only; nothing serves HTTP yet |
 | `stepd-core` | Complete | 72 tests, in-memory fakes for every interface |
 | `stepd-store-postgres` | Complete | 16 unit + 25 live + the simulation harness |
 | `stepd-expr-cel` | Complete (documented subset) | 16 tests |

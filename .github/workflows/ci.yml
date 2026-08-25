@@ -89,7 +89,7 @@ jobs:
       # and finishes in a minute.
       - name: install, typecheck, test, build
         run: |
-          for w in spec/typescript; do
+          for w in spec/typescript sdk/typescript; do
             echo "::group::$w"
             (cd "$w" \
               && pnpm install --frozen-lockfile \
