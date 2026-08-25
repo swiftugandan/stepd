@@ -119,7 +119,7 @@ superseded the prototype, the row says so.
 | Simulation harness design | **Built**, twice: `reference/simulation.py` against the model and `engine/rust/crates/stepd-store-postgres/tests/simulation.rs` (5 tests) against the real engine; `reference/coverage_check.py` reports never-exercised paths | M0.5 |
 | Risk-zone ownership map (drives selective test execution) | Specified, not built | M0.5 |
 | Tiered CI configuration with enforced time budgets | **Tiers built, budgets not enforced.** `.github/workflows/ci.yml` has six lanes across tiers 1–4; three name a time budget (`≤10s`, `≤5min`, `≤30min`), one names a cadence (`nightly`), and two — `tier 1 · crate boundaries` and `tier 3 · through pgbouncer` — name neither. Nothing holds a lane to its budget: the `timeout-minutes` guards are 10/10/20/30/40/360, each far above the budget beside it, so they catch a hang and not a lane that has outgrown its tier. PRD §10.2's diff-driven selective execution is absent too — no lane carries a `paths:` filter | M0.5 |
-| ADRs 001–024 | **Written** — 24 files under `docs/adr/` | M0.5 |
+| ADRs 001–025 | **Written** — 25 files under `docs/adr/` | M0.5 |
 | Console IA and wireframes | **Built and tested** (`reference/console.html`, 17 assertions incl. content-safety audit and the operator flow; the shipped console is `engine/rust/crates/stepd-server/assets/console.html`) | M3 |
 | Threat model | Not started | M4 |
 | Operations runbooks (incl. restore hazard) | **Written**: `restore-hazard`, `stuck-run`, `backlog`, `poison-pill`, `upgrade` under `docs/runbooks/`. None has been rehearsed | M4 |

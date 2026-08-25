@@ -55,7 +55,7 @@ engine crates ([ADR-024](docs/adr/024-language-trees.md)).
 | `stepd-proto` | Complete | 36 tests, plus the cross-language fixtures |
 | `@stepd/protocol` | Complete | 103 tests; agrees with `stepd-proto` on 20 committed vectors |
 | `@stepd/sdk-core` | Complete | 76 tests — the replay machinery |
-| `@stepd/sdk` | Complete | 48 tests; the TypeScript app reaches **level 2**, 28/28 cases |
+| `@stepd/sdk` | Complete | 64 tests, including the in-process workflow harness; the TypeScript app reaches **level 2**, 28/28 cases |
 | `stepd-core` | Complete | 72 tests, in-memory fakes for every interface |
 | `stepd-store-postgres` | Complete | 16 unit + 25 live + the simulation harness |
 | `stepd-expr-cel` | Complete (documented subset) | 16 tests |
@@ -368,13 +368,14 @@ and skipped counts, and — if the sweep gave up on a schedule — why.
 | | |
 |---|---|
 | `spec/PROTOCOL.md` | The wire protocol. The thing a third party implements against — §12 now says what they must expose for the battery to run. |
-| `docs/adr/` | Twenty-four ADRs. Start with 011, 012 and 019 — the silent-corruption ones; 024 is why the tree is laid out as it is. ADR-016 records what building cron taught about ADR-016; 021 and 022 what the conformance suite found. |
+| `docs/adr/` | Twenty-five ADRs. Start with 011, 012 and 019 — the silent-corruption ones; 024 is why the tree is laid out as it is, and 025 where the TypeScript SDK deliberately differs from the Rust one. ADR-016 records what building cron taught about ADR-016; 021 and 022 what the conformance suite found. |
 | `docs/runbooks/restore-hazard.md` | **Read before you need it.** A point-in-time restore re-executes side effects — and re-fires cron occurrences, which is section 3a. |
 | `docs/runbooks/` | Stuck runs, backlog, poison pills, upgrades. |
 | `docs/RECONCILIATION.md` | What was wrong with the archived tree, what was done, and §7 — the findings worth carrying forward. |
 | `docs/GAPS.md` | The gap register, with a resolution against each gap. A snapshot; the [issue tracker](https://github.com/swiftugandan/stepd/issues) is the live list. |
 | `docs/blob-backends.md` | Which S3-compatible servers were observed to enforce a signed upload checksum, and what each one's rejection actually looked like. Read before choosing a store for `STEPD_BLOB_BACKEND=s3`. |
 | `docs/SDK-DESIGN-rust.md` | The two mechanisms that carry all the SDK's risk. |
+| `docs/SDK-DESIGN-typescript.md` | The same ground for TypeScript, and what replaces Rust's `!Send`. |
 
 ## Licence
 

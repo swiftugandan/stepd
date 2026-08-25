@@ -4,9 +4,15 @@ What a workflow author imports. No engine, no database, no server.
 
 ```
 packages/sdk-core/    the replay machinery — no I/O, no HTTP
-packages/sdk/         the builders, the manifest, the request handler
+packages/sdk/         the builders, the manifest, the request handler, blobs, the harness
 apps/conformance/     the §12.2 battery app — never published, never a production route
 ```
+
+| Entry point | |
+|---|---|
+| `@stepd/sdk` | `App`, `fn`, `Ctx`, `Blobs`, `createHandler` |
+| `@stepd/sdk/node` | `nodeListener(app)` for `http.createServer` |
+| `@stepd/sdk/testing` | `harness(handler)` — no database, no server, no HTTP |
 
 **`stepd conformance` reports this app CONFORMANT AT LEVEL 2** — all nineteen
 suites declared, 28 of 28 cases passing, including the two-phase blob upload and
@@ -112,7 +118,36 @@ which is the only safe alternative: replaying against a partial journal
 re-executes every step the app could not see, the run still completes, and
 nothing errors.
 
-## Two deliberate differences from the Rust SDK
+## Testing a workflow
+
+```ts
+import { harness } from '@stepd/sdk/testing';
+
+const t = harness(chargeAndShip);
+t.sendEvent('order.approved', true);          // BEFORE the wait
+expect(await t.runToCompletion()).toBe(true);
+t.assertStepExecutedOnce('charge');
+```
+
+No database, no server, no HTTP. Note what that proves: the event was delivered
+*before* the handler reached its `waitEvent`, and the run still resolved — §7.6's
+early-signal guarantee, in three lines.
+
+The harness drives the **same `runPass`** the real handler drives. One with its
+own replay logic would let a workflow pass here and fail in production for
+reasons the test could not see. It ships only *settled* steps into the memo, for
+the same reason: a harness that shipped pending rows would be more permissive
+than the engine, and a workflow could pass its tests and hang once deployed.
+
+`assertStepExecutedOnce` is the assertion to reach for. At-least-once execution
+is the contract, so "ran once" is a property of memoisation working rather than
+something a handler can arrange for itself.
+
+## Deliberate differences from the Rust SDK
+
+There are eight, and they are recorded with their reasons in
+[ADR-025](../../docs/adr/025-typescript-sdk-divergences.md). Two of them change
+what a workflow may do:
 
 **Step results are projected through JSON on first execution too.** Rust returns
 the original value the first time and the JSON projection on replay, so
@@ -123,12 +158,15 @@ attempt forty.
 
 **A step body may not create steps.** See the table above.
 
+[`docs/SDK-DESIGN-typescript.md`](../../docs/SDK-DESIGN-typescript.md) covers the
+design in full.
+
 ## Running the tests
 
 No database, no server, no `STEPD_TEST_DATABASE_URL`:
 
 ```bash
-pnpm test        # 124 tests: 76 in sdk-core, 48 in sdk
+pnpm test        # 140 tests: 76 in sdk-core, 64 in sdk
 pnpm typecheck
 pnpm build       # ESM, CJS and .d.ts
 ```

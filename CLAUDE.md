@@ -110,5 +110,6 @@ say which issue a change closes.
 | [`spec/PROTOCOL.md`](spec/PROTOCOL.md) | The wire protocol |
 | [`docs/adr/`](docs/adr/) | ADRs; the silent-corruption ones are eager occurrence claiming, the durable run inbox and pooler-safe locking |
 | [`docs/runbooks/restore-hazard.md`](docs/runbooks/restore-hazard.md) | Read before you need it: PITR re-executes side effects |
+| [`sdk/typescript/README.md`](sdk/typescript/README.md) | The TypeScript SDK; `docs/SDK-DESIGN-typescript.md` and [ADR-025](docs/adr/025-typescript-sdk-divergences.md) for its design and its deliberate differences from the Rust one |
 | [`docs/GAPS.md`](docs/GAPS.md) | Gap register — note it records spec resolutions, not always code |
 | [`docs/RECONCILIATION.md`](docs/RECONCILIATION.md) | The defects found and fixed, and §7 — the findings worth carrying forward |
