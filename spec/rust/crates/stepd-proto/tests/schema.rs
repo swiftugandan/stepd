@@ -145,9 +145,11 @@ fn function(id: &str, trigger: Trigger) -> FunctionConfig {
 
 /// Same mapping as `spec/validate.py` CASES: a round-trip through this crate
 /// must still be a document those schemas accept.
+type ParseExample = fn(&str) -> Value;
+
 #[test]
 fn a_round_tripped_example_is_still_schema_valid() {
-    let cases: &[(&str, &str, fn(&str) -> Value)] = &[
+    let cases: &[(&str, &str, ParseExample)] = &[
         (
             "attempt-request.schema.json",
             "attempt-request.example.json",

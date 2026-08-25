@@ -62,7 +62,7 @@ describe('remaining wire examples', () => {
     expect(m.protocol).toBe('1');
     expect(m.app_id).toBe('billing');
     expect(m.functions).toHaveLength(1);
-    expect(m.functions[0].triggers.length).toBeGreaterThan(0);
+    expect(m.functions[0]?.triggers.length).toBeGreaterThan(0);
   });
 
   it('function-config-cron.example.json is a FunctionConfig', () => {
