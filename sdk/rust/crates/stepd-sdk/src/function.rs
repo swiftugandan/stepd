@@ -508,6 +508,53 @@ impl App {
 mod tests {
     use super::*;
 
+    /// `^[a-z0-9_-]+/[0-9A-Za-z.+-]+$`, from `app-manifest.schema.json`.
+    fn sdk_identifier_well_formed(v: &str) -> bool {
+        match v.split_once('/') {
+            None => false,
+            Some((language, version)) => {
+                !language.is_empty()
+                    && language.chars().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-'
+                    })
+                    && !version.is_empty()
+                    && version
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '+' || c == '-')
+            }
+        }
+    }
+
+    #[test]
+    fn the_sdk_identifier_matches_the_manifest_schema() {
+        // `SDK_VERSION` reaches the wire twice — as `sdk` in the app manifest,
+        // which the schema constrains to `^[a-z0-9_-]+/[0-9A-Za-z.+-]+$`, and as
+        // the `stepd-sdk` header on every response. Nothing checked its shape
+        // until a repository restructure rewrote the literal `"rust/"` inside
+        // `concat!("rust/", env!("CARGO_PKG_VERSION"))` as though it were a
+        // path, producing `engine/rust/0.1.0`. The whole conformance battery
+        // still passed: the runner does not validate this field, and
+        // `spec/validate.py` checks the committed examples rather than what this
+        // crate emits.
+        assert!(
+            sdk_identifier_well_formed(crate::SDK_VERSION),
+            "SDK_VERSION `{}` does not match the manifest schema's pattern",
+            crate::SDK_VERSION
+        );
+
+        // The check earns its place only if it rejects the value that got here.
+        // A second slash puts a `/` in the version part, where it is not allowed.
+        assert!(
+            !sdk_identifier_well_formed("engine/rust/0.1.0"),
+            "the check accepts the malformed identifier it exists to catch"
+        );
+        assert!(!sdk_identifier_well_formed("rust"), "no slash at all");
+        assert!(
+            !sdk_identifier_well_formed("Rust/0.1.0"),
+            "the language part is lowercase"
+        );
+    }
+
     #[test]
     fn iso_durations_parse_or_abstain() {
         assert_eq!(iso8601_seconds("PT60S"), Some(60));

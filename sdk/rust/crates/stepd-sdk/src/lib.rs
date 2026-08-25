@@ -76,7 +76,7 @@ pub use stepd_sdk_core::{
 };
 
 /// The SDK's version string, sent in the `stepd-sdk` header.
-pub const SDK_VERSION: &str = concat!("engine/rust/", env!("CARGO_PKG_VERSION"));
+pub const SDK_VERSION: &str = concat!("rust/", env!("CARGO_PKG_VERSION"));
 
 /// Everything a handler module normally needs.
 pub mod prelude {

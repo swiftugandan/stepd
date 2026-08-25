@@ -883,7 +883,7 @@ pub fn router(reference: ReferenceApp) -> axum::Router {
             get(|| async {
                 axum::Json(serde_json::json!({
                     "protocol": stepd_proto::PROTOCOL_VERSION,
-                    "sdk": concat!("engine/rust/", env!("CARGO_PKG_VERSION")),
+                    "sdk": concat!("rust/", env!("CARGO_PKG_VERSION")),
                     "suites": SUITES,
                     "statically_prevented": STATICALLY_PREVENTED,
                 }))
