@@ -4,11 +4,20 @@ What a workflow author imports. No engine, no database, no server.
 
 ```
 packages/sdk-core/    the replay machinery — no I/O, no HTTP
+packages/sdk/         the builders, the manifest, the request handler
+apps/conformance/     the §12.2 battery app — never published, never a production route
 ```
 
-`packages/sdk` (the builders, the request handler, the blob client and the test
-harness) is not written yet. The root [`README.md`](../../README.md) says what is
-finished and what is not.
+**`stepd conformance` reports this app CONFORMANT AT LEVEL 1**, with all twelve
+declared cases passing. The twelve level-2 suites are not declared, so the runner
+reports them as unknowns that bar level 2 rather than as failures — the blob
+client, the §8.6 paging and the level-2 handlers are not written yet. The root
+[`README.md`](../../README.md) says what is finished and what is not.
+
+The SDK's surface is `(Request) => Promise<Response>`, so the same handler runs
+under `node:http`, Bun, Deno, a Cloudflare Worker or a Next.js route. Framework
+adapters are not written yet; `apps/conformance/src/server.ts` has the `node:http`
+bridge in about forty lines, which is roughly what one will be.
 
 ## Why this is a separate workspace
 
@@ -88,7 +97,27 @@ attempt forty.
 No database, no server, no `STEPD_TEST_DATABASE_URL`:
 
 ```bash
-pnpm test        # 75 tests
+pnpm test        # 106 tests: 76 in sdk-core, 30 in sdk
 pnpm typecheck
 pnpm build       # ESM, CJS and .d.ts
 ```
+
+## Running the battery against it
+
+```bash
+(cd ../../spec/typescript && pnpm build) && pnpm build
+(cd apps/conformance && PORT=9944 node --experimental-strip-types src/main.ts &)
+
+cd ../../engine/rust
+cargo run -p stepd-cli -- \
+  --database-url postgres://postgres@127.0.0.1:5433/stepd_conf_ts \
+  conformance \
+  --app http://127.0.0.1:9944 \
+  --app-configure-url http://127.0.0.1:9944/_conformance/configure
+```
+
+`--app-configure-url` is how an app the runner did not start learns the server's
+address and a token. It is not needed at level 1 and is passed anyway, because
+the level-2 suites that need it are the next thing to land.
+
+CI runs exactly this, in `tier 2 · integration`.

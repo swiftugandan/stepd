@@ -72,3 +72,14 @@ export class OccurrenceCounter {
     return this.#counts.get(stepId) ?? 0;
   }
 }
+
+/**
+ * The manifest checksum algorithm (§3).
+ *
+ * `app-manifest.schema.json` types `checksum` as `^sha256:[0-9a-f]{64}$`; this
+ * returns the hex half. Here rather than in the SDK so a language binding's one
+ * crypto dependency stays in one package.
+ */
+export function sha256Hex(text: string): string {
+  return bytesToHex(sha256(utf8ToBytes(text)));
+}

@@ -179,6 +179,15 @@ jobs:
             spec/rust
             sdk/rust
             engine/rust
+      # For the TypeScript conformance step below.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: "**/pnpm-lock.yaml"
 
       - name: protocol schemas
         # In a virtualenv, and pinned. ubuntu-latest ships jsonschema 4.10 in
@@ -215,6 +224,33 @@ jobs:
       - name: live-database and end-to-end tests
         run: cargo test --workspace
         working-directory: engine/rust
+
+      - name: conformance battery against the TypeScript app
+        # The claim this lane exists to keep honest: the protocol is
+        # implementable in a second language. The bundled Rust reference app and
+        # the battery were written together, so a pass there can only show the
+        # suite is self-consistent; this one crosses the language boundary.
+        #
+        # `--app-configure-url` is how an app the runner did not start learns the
+        # server's address and a token. Without it `blobs` and `truncation` are
+        # unreachable, which is why they are not declared yet.
+        run: |
+          set -euo pipefail
+          for w in spec/typescript sdk/typescript; do
+            (cd "$w" && pnpm install --frozen-lockfile && pnpm build)
+          done
+          (cd sdk/typescript/apps/conformance && PORT=9944 node --experimental-strip-types src/main.ts &)
+          for _ in $(seq 1 40); do
+            curl -sf http://127.0.0.1:9944/.well-known/stepd-conformance >/dev/null && break
+            sleep 0.25
+          done
+          psql "$STEPD_TEST_DATABASE_URL" -c 'CREATE DATABASE stepd_conf_ts'
+          cd engine/rust
+          cargo run -p stepd-cli -- \
+            --database-url "${STEPD_TEST_DATABASE_URL%/*}/stepd_conf_ts" \
+            conformance \
+            --app http://127.0.0.1:9944 \
+            --app-configure-url http://127.0.0.1:9944/_conformance/configure
 
       - name: conformance battery against the reference app
         # PRD T2 requires this lane. It is separate from `cargo test --workspace`

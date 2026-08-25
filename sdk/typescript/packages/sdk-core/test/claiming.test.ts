@@ -1,6 +1,6 @@
 import { stepHash } from '@stepd/protocol';
 import { describe, expect, it } from 'vitest';
-import { Ctx, isHalt } from '../src/index.js';
+import { Ctx, isHalt, runPass } from '../src/index.js';
 import { Driver, Effects } from './driver.js';
 
 const ctxFor = (d: Driver): Ctx => d.newCtx();
@@ -146,6 +146,28 @@ describe('the guards that replace Rust\'s !Send', () => {
       ctx.step('late', () => 1);
     } catch (e) {
       expect(isHalt(e) && e.reason).toBe('fatal');
+    }
+  });
+
+  it('reports a nested claim as a protocol violation, not a retryable error', async () => {
+    // The distinction is the whole point. If the Halt raised at claim time were
+    // read as an application failure, the engine would retry a program that
+    // cannot succeed — four attempts, an hour of backoff, and a final failure
+    // whose message says nothing about the actual mistake.
+    const d = new Driver();
+    const { outcome } = await runPass(d.newCtx(), async (ctx: Ctx) => {
+      await ctx.step('outer', () => {
+        ctx.step('inner', () => 1);
+        return 1;
+      });
+      return null;
+    });
+    expect(outcome.kind).toBe('error');
+    if (outcome.kind === 'error') {
+      expect(outcome.retryable).toBe(false);
+      expect(outcome.error.code).toBe('protocol_violation');
+      // And nothing is recorded: the outer step never reached an outcome.
+      expect(outcome.ops).toEqual([]);
     }
   });
 

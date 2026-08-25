@@ -6,7 +6,7 @@ import {
   type RecordedStep,
   type RunContext,
 } from '@stepd/protocol';
-import { Halt, StepFailure, asFailure, fatalCoded } from './errors.js';
+import { Halt, StepFailure, asFailure, fatalCoded, isHalt } from './errors.js';
 import { toJson } from './json.js';
 import { groupOutcome, rejectDuplicateIds } from './parallel.js';
 import { StepFuture } from './step.js';
@@ -288,6 +288,14 @@ export class Ctx {
       try {
         value = await body();
       } catch (e) {
+        // A Halt is control flow, not an application failure, and must reach
+        // `runPass` unchanged. Passing it through `asFailure` would turn a
+        // protocol violation raised inside a body — a nested `ctx.step`, which
+        // is refused at claim time — into an ordinary retryable error, so the
+        // engine would retry a program that cannot succeed and the violation
+        // would never be reported as one.
+        if (isHalt(e)) throw e;
+
         // A failure is not a halt, but it still ends the pass, and the driver
         // needs to know a step was reached — otherwise a swallowed failure
         // masquerades as a clean return.
